@@ -8,7 +8,7 @@ mod out;
 
 use args::Args;
 use out::{emit, fail, finish};
-use uitap_ops::{image, input, observe, tap as tap_op, wait, OpResult};
+use uitap_ops::{ax, image, input, observe, tap as tap_op, wait, OpResult};
 use uitap_platform::{capture_available, open, parse_combo};
 
 const USAGE: &str = r#"uitap — 跨平台桌面观测与输入合成，输出均为单行 JSON
@@ -38,6 +38,18 @@ const USAGE: &str = r#"uitap — 跨平台桌面观测与输入合成，输出�
 
   tap       --at X,Y [--window ID | --region X,Y,W,H | --display N] [--timeout MS]
             [--stableSamples N] [--button N] [--count N] [--keep]
+
+  tree      [--app N | --pid N | --window ID] [--depth N] [--maxNodes N]
+                                            辅助功能元素树（拍平，path 为索引链）
+  find      [目标] [--role N] [--subrole N] [--title N] [--value N] [--identifier N] [--enabled]
+            [--depth N] [--maxNodes N] [--limit N]
+                                            按条件查元素，条件按「包含」匹配
+  actions   [目标] --path P                 列出元素支持的动作
+  press     [目标] --path P [--action press|showMenu|increment|decrement|confirm|cancel|pick]
+                                            对元素执行动作（默认 press，相当于点击）
+  set-value [目标] --path P --value S        设置元素的值
+  wait-for  [目标] [同 find 的条件] [--timeout MS] [--interval MS]
+                                            等符合条件的元素出现
 
   mcp                                       以 stdio 起 MCP server
 
@@ -131,9 +143,62 @@ fn dispatch_platform(command: &str, a: &Args, backend: &uitap_platform::Current)
             Some(at) => tap_op::tap(backend, &mapping::tap_request(a, at)),
             None => Err("--at x,y is required".into()),
         },
+        "tree" => dispatch_element(a, backend, |backend, pid| {
+            ax::tree(backend, pid, &mapping::tree_limits(a), mapping::element_window(a))
+        }),
+        "find" => dispatch_element(a, backend, |backend, pid| {
+            ax::find(
+                backend,
+                pid,
+                &mapping::element_query(a),
+                &mapping::tree_limits(a),
+                mapping::element_window(a),
+                a.int("limit", 20).max(1) as usize,
+            )
+        }),
+        "actions" => dispatch_element(a, backend, |backend, pid| {
+            require_path(a).and_then(|path| ax::actions(backend, pid, path))
+        }),
+        "press" => dispatch_element(a, backend, |backend, pid| {
+            let path = require_path(a)?;
+            ax::act(backend, pid, path, mapping::element_action(a))
+        }),
+        "set-value" => dispatch_element(a, backend, |backend, pid| {
+            let path = require_path(a)?;
+            let value = a.str("value").ok_or("--value is required")?;
+            ax::set_value(backend, pid, path, value)
+        }),
+        "wait-for" => dispatch_element(a, backend, |backend, pid| {
+            ax::wait_for(
+                backend,
+                pid,
+                &mapping::element_query(a),
+                &mapping::tree_limits(a),
+                mapping::element_window(a),
+                a.int("timeout", 5000).max(100) as u64,
+                a.int("interval", 200).max(50) as u64,
+            )
+        }),
         other => fail(format!("unknown command: {other}")),
     };
     finish(result)
+}
+
+/// 元素类命令共用：解析目标进程，再交给具体操作。
+fn dispatch_element<F>(
+    a: &Args,
+    backend: &uitap_platform::Current,
+    run: F,
+) -> OpResult<serde_json::Value>
+where
+    F: FnOnce(&uitap_platform::Current, i32) -> OpResult<serde_json::Value>,
+{
+    let pid = ax::resolve_pid(backend, &mapping::app_target(a))?;
+    run(backend, pid)
+}
+
+fn require_path(a: &Args) -> OpResult<&str> {
+    a.str("path").ok_or_else(|| "--path is required".to_string())
 }
 
 fn dispatch_key(a: &Args, backend: &uitap_platform::Current) -> OpResult<serde_json::Value> {

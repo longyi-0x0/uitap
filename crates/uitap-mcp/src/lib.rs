@@ -20,12 +20,12 @@ use rmcp::model::{
 use rmcp::service::{RequestContext, RoleServer, ServiceExt};
 use rmcp::{ErrorData, ServerHandler};
 
-use uitap_core::backend::CaptureTarget;
+use uitap_core::backend::{CaptureTarget, ElementAction, TreeLimits};
 use uitap_core::geom::Rect;
 use uitap_ops::{
-    image, input, observe, tap as tap_op, wait, ActivateRequest, AnchorOverride, CropRequest,
-    DiffRequest, PixelRequest, ScrollRequest, ShotRequest, TapRequest, Units, WaitParams,
-    WindowQuery,
+    ax, image, input, observe, tap as tap_op, wait, ActivateRequest, AnchorOverride, AppTarget,
+    CropRequest, DiffRequest, ElementQuery, PixelRequest, ScrollRequest, ShotRequest, TapRequest,
+    Units, WaitParams, WindowQuery,
 };
 use uitap_platform::{capture_available, open, parse_combo, Current};
 
@@ -277,6 +277,63 @@ fn dispatch(
             Ok(vec![text(input::activate(&backend, &request)?)])
         }
 
+        "ui_tree" => {
+            let pid = element_pid(&backend, args)?;
+            Ok(vec![text(ax::tree(
+                &backend,
+                pid,
+                &tree_limits(args),
+                element_window(args),
+            )?)])
+        }
+
+        "ui_find" => {
+            let pid = element_pid(&backend, args)?;
+            Ok(vec![text(ax::find(
+                &backend,
+                pid,
+                &element_query(args),
+                &tree_limits(args),
+                element_window(args),
+                extract::integer(args, "limit").unwrap_or(20).max(1) as usize,
+            )?)])
+        }
+
+        "ui_actions" => {
+            let pid = element_pid(&backend, args)?;
+            let path = extract::required_string(args, "path")?;
+            Ok(vec![text(ax::actions(&backend, pid, &path)?)])
+        }
+
+        "ui_press" => {
+            let pid = element_pid(&backend, args)?;
+            let path = extract::required_string(args, "path")?;
+            let action = extract::string(args, "action")
+                .and_then(|name| ElementAction::parse(&name))
+                .unwrap_or(ElementAction::Press);
+            Ok(vec![text(ax::act(&backend, pid, &path, action)?)])
+        }
+
+        "ui_set_value" => {
+            let pid = element_pid(&backend, args)?;
+            let path = extract::required_string(args, "path")?;
+            let value = extract::required_string(args, "value")?;
+            Ok(vec![text(ax::set_value(&backend, pid, &path, &value)?)])
+        }
+
+        "ui_wait_for" => {
+            let pid = element_pid(&backend, args)?;
+            Ok(vec![text(ax::wait_for(
+                &backend,
+                pid,
+                &element_query(args),
+                &tree_limits(args),
+                element_window(args),
+                extract::integer(args, "timeoutMs").unwrap_or(5000).max(100) as u64,
+                extract::integer(args, "intervalMs").unwrap_or(200).max(50) as u64,
+            )?)])
+        }
+
         "ui_tap" => {
             let at = uitap_core::geom::Point::new(
                 extract::required_number(args, "x")?,
@@ -332,6 +389,49 @@ fn target(args: &Value) -> Result<CaptureTarget, String> {
     Ok(CaptureTarget::Screen {
         display_index: None,
     })
+}
+
+/// 元素类工具的目标进程。
+fn element_pid(backend: &Current, args: &Value) -> Result<i32, String> {
+    let target = AppTarget::from_parts(
+        extract::string(args, "app"),
+        extract::integer(args, "pid").map(|v| v as i32),
+        extract::integer(args, "window").map(|v| v as u64),
+    )
+    .ok_or_else(|| "app、pid 或 window 至少给一个，用来确定目标应用".to_string())?;
+    ax::resolve_pid(backend, &target)
+}
+
+/// 元素树遍历的边界，沿用 core 的默认值。
+fn tree_limits(args: &Value) -> TreeLimits {
+    let defaults = TreeLimits::default();
+    TreeLimits {
+        max_depth: extract::integer(args, "depth")
+            .unwrap_or(defaults.max_depth as i64)
+            .max(0) as usize,
+        max_nodes: extract::integer(args, "maxNodes")
+            .unwrap_or(defaults.max_nodes as i64)
+            .max(1) as usize,
+    }
+}
+
+/// `--window` 限定元素树范围；给 pid 或 app 时不限定。
+fn element_window(args: &Value) -> Option<u64> {
+    if args.get("pid").is_some() || args.get("app").is_some() {
+        return None;
+    }
+    extract::integer(args, "window").map(|v| v as u64)
+}
+
+fn element_query(args: &Value) -> ElementQuery {
+    ElementQuery {
+        role: extract::string(args, "role"),
+        subrole: extract::string(args, "subrole"),
+        title: extract::string(args, "title"),
+        value: extract::string(args, "value"),
+        identifier: extract::string(args, "identifier"),
+        enabled_only: extract::flag(args, "enabled"),
+    }
 }
 
 fn wait_params(args: &Value) -> WaitParams {

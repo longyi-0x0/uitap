@@ -6,6 +6,7 @@
 //! 输入合成走 `CGEvent`，投递到 HID 层，与真实输入设备同一路径。
 
 pub mod apps;
+pub mod ax;
 pub mod keys;
 pub mod mainthread;
 mod sys;
@@ -18,8 +19,9 @@ use objc2_app_kit::{
 };
 
 use uitap_core::backend::{
-    ActivateTarget, Backend, BackendError, CaptureMode, CaptureTarget, DisplayInfo, Modifier,
-    MouseButton, Permissions, RawCapture, Result, RunningApp, WindowInfo,
+    ActivateTarget, Backend, BackendError, CaptureMode, CaptureTarget, DisplayInfo, ElementAction,
+    ElementNode, Modifier, MouseButton, Permissions, RawCapture, Result, RunningApp, TreeLimits,
+    WindowInfo,
 };
 use uitap_core::geom::{Point, Rect};
 use uitap_core::pixels;
@@ -452,6 +454,12 @@ impl Backend for MacBackend {
         MacBackend::activate_inline(target)
     }
 
+    fn running_app(&self, name: &str) -> Result<RunningApp> {
+        let app = find_running_app(name)
+            .ok_or_else(|| BackendError::Failed(format!("application not found: {name}")))?;
+        Ok(app_info(&app))
+    }
+
     fn frontmost(&self) -> Result<RunningApp> {
         let workspace = NSWorkspace::sharedWorkspace();
         match workspace.frontmostApplication() {
@@ -462,13 +470,33 @@ impl Backend for MacBackend {
             None => Err(BackendError::Failed("no frontmost application".into())),
         }
     }
+
+    fn element_tree(
+        &self,
+        pid: i32,
+        limits: &TreeLimits,
+        window: Option<u64>,
+    ) -> Result<Vec<ElementNode>> {
+        ax::element_tree(pid, limits, window)
+    }
+
+    fn element_act(&self, pid: i32, path: &[usize], action: ElementAction) -> Result<String> {
+        ax::perform_action(pid, path, action)
+    }
+
+    fn element_set_value(&self, pid: i32, path: &[usize], value: &str) -> Result<()> {
+        ax::set_value(pid, path, value)
+    }
+
+    fn element_actions(&self, pid: i32, path: &[usize]) -> Result<Vec<String>> {
+        ax::element_actions(pid, path)
+    }
 }
 
 impl MacBackend {
     /// 激活的实际实现。调用方负责保证它在主线程执行。
     fn activate_inline(target: &ActivateTarget) -> Result<RunningApp> {
         let backend = MacBackend::new();
-        let workspace = NSWorkspace::sharedWorkspace();
 
         let app = match target {
             ActivateTarget::Pid(pid) => {
@@ -478,38 +506,7 @@ impl MacBackend {
                 let win = backend.window_by_id(*id)?;
                 NSRunningApplication::runningApplicationWithProcessIdentifier(win.pid)
             }
-            ActivateTarget::App(name) => {
-                let needle = name.to_ascii_lowercase();
-                let running = workspace.runningApplications();
-                let mut exact = None;
-                let mut partial = None;
-                for app in running.iter() {
-                    let localized = app
-                        .localizedName()
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-                    let bundle = app
-                        .bundleIdentifier()
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-                    let prohibited = app.activationPolicy()
-                        == NSApplicationActivationPolicy::Prohibited;
-
-                    match apps::classify(&needle, &localized, &bundle, prohibited) {
-                        Some(apps::MatchKind::Exact) => {
-                            exact = Some(app.clone());
-                            break;
-                        }
-                        Some(apps::MatchKind::Partial) => {
-                            if partial.is_none() {
-                                partial = Some(app.clone());
-                            }
-                        }
-                        None => {}
-                    }
-                }
-                exact.or(partial)
-            }
+            ActivateTarget::App(name) => find_running_app(name),
         };
 
         let app = app.ok_or_else(|| BackendError::Failed("application not found".into()))?;
@@ -540,6 +537,39 @@ impl MacBackend {
 
         Ok(RunningApp { frontmost, ..info })
     }
+}
+
+/// 按名称匹配运行中的应用。精确命中优先于模糊命中；无法置前的辅助进程不参与匹配。
+fn find_running_app(name: &str) -> Option<objc2::rc::Retained<NSRunningApplication>> {
+    let needle = name.to_ascii_lowercase();
+    let workspace = NSWorkspace::sharedWorkspace();
+    let running = workspace.runningApplications();
+    let mut exact = None;
+    let mut partial = None;
+
+    for app in running.iter() {
+        let localized = app
+            .localizedName()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let bundle = app
+            .bundleIdentifier()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let prohibited =
+            app.activationPolicy() == NSApplicationActivationPolicy::Prohibited;
+
+        match apps::classify(&needle, &localized, &bundle, prohibited) {
+            Some(apps::MatchKind::Exact) => return Some(app.clone()),
+            Some(apps::MatchKind::Partial) => {
+                if partial.is_none() {
+                    partial = Some(app.clone());
+                }
+            }
+            None => {}
+        }
+    }
+    exact.take().or(partial)
 }
 
 fn push_region(args: &mut Vec<String>, r: &Rect) {

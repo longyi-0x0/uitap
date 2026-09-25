@@ -47,6 +47,53 @@ fn target_properties() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// 元素类工具的目标：应用名 / pid / 窗口 id 三选一。
+fn app_target_properties() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "app",
+            json!({ "type": "string", "description": "应用名或 bundle id，如 Finder" }),
+        ),
+        ("pid", json!({ "type": "number", "description": "进程 id" })),
+        (
+            "window",
+            json!({ "type": "number", "description": "窗口 id，取其所属进程" }),
+        ),
+    ]
+}
+
+/// 树遍历的边界。
+fn tree_properties() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "depth",
+            json!({ "type": "number", "description": "最大层数，默认 12" }),
+        ),
+        (
+            "maxNodes",
+            json!({ "type": "number", "description": "最大节点数，默认 200；超出时返回带 truncated" }),
+        ),
+    ]
+}
+
+/// 元素查询条件，`ui_find` 与 `ui_wait_for` 共用。字符串按「包含」匹配，大小写不敏感。
+fn query_properties() -> Vec<(&'static str, Value)> {
+    vec![
+        ("role", json!({ "type": "string", "description": "辅助功能角色，如 AXButton、AXTextArea" })),
+        (
+            "subrole",
+            json!({ "type": "string", "description": "次级角色，如 AXCloseButton、AXFullScreenButton；区分同名控件用它" }),
+        ),
+        ("title", json!({ "type": "string", "description": "标题或描述" })),
+        ("value", json!({ "type": "string", "description": "元素当前的值" })),
+        ("identifier", json!({ "type": "string", "description": "开发者设定的标识符" })),
+        (
+            "enabled",
+            json!({ "type": "boolean", "description": "只看 enabled 为真的元素（并非所有角色都有该属性）" }),
+        ),
+    ]
+}
+
 /// 等待稳定相关参数，`ui_tap` 与 `ui_wait_stable` 共用。
 fn wait_properties() -> Vec<(&'static str, Value)> {
     vec![
@@ -246,6 +293,95 @@ pub fn tool_list() -> Vec<Tool> {
             )),
         ),
         Tool::new(
+            "ui_tree",
+            "读取应用的辅助功能元素树（拍平，广度优先）。path 是从应用根开始的子索引链，可直接用于 ui_press / ui_set_value / ui_actions。比截图更省 token，且不受遮挡影响。",
+            schema(merge(
+                &{
+                    let mut props = app_target_properties();
+                    props.extend(tree_properties());
+                    props
+                },
+                &[],
+            )),
+        ),
+        Tool::new(
+            "ui_find",
+            "在元素树里按条件查元素。条件按「包含」匹配、大小写不敏感，给出的每一项都必须满足。返回 path 与 bounds，可直接接 ui_press 或换算成点击坐标。",
+            schema(merge(
+                &{
+                    let mut props = app_target_properties();
+                    props.extend(query_properties());
+                    props.extend(tree_properties());
+                    props
+                },
+                &[(
+                    "limit",
+                    json!({ "type": "number", "description": "返回条数上限，默认 20" }),
+                )],
+            )),
+        ),
+        Tool::new(
+            "ui_actions",
+            "列出元素支持的动作（AXPress、AXIncrement 等）。列表为空表示该元素不可交互。",
+            schema(object(
+                json!({
+                    "app": { "type": "string" },
+                    "pid": { "type": "number" },
+                    "window": { "type": "number" },
+                    "path": { "type": "string", "description": "元素路径，如 0.1.3" },
+                }),
+                &["path"],
+            )),
+        ),
+        Tool::new(
+            "ui_press",
+            "对元素执行动作，默认 press（相当于点击）。走辅助功能接口，不移动鼠标、不切换前台应用。失败时会列出该元素实际支持的动作。",
+            schema(object(
+                json!({
+                    "app": { "type": "string" },
+                    "pid": { "type": "number" },
+                    "window": { "type": "number" },
+                    "path": { "type": "string", "description": "元素路径，来自 ui_find / ui_tree" },
+                    "action": {
+                        "type": "string",
+                        "enum": ["press", "showMenu", "increment", "decrement", "confirm", "cancel", "pick"],
+                        "description": "默认 press",
+                    },
+                }),
+                &["path"],
+            )),
+        ),
+        Tool::new(
+            "ui_set_value",
+            "设置元素的值，用于文本框等可直接写入的控件。走辅助功能接口，不触发键盘输入。",
+            schema(object(
+                json!({
+                    "app": { "type": "string" },
+                    "pid": { "type": "number" },
+                    "window": { "type": "number" },
+                    "path": { "type": "string", "description": "元素路径" },
+                    "value": { "type": "string", "description": "要写入的文本" },
+                }),
+                &["path", "value"],
+            )),
+        ),
+        Tool::new(
+            "ui_wait_for",
+            "等符合条件的元素出现。用于等待弹窗、加载完成、某个按钮变为可点。比反复截图比对省 token。",
+            schema(merge(
+                &{
+                    let mut props = app_target_properties();
+                    props.extend(query_properties());
+                    props.extend(tree_properties());
+                    props
+                },
+                &[
+                    ("timeoutMs", json!({ "type": "number", "description": "等待上限，默认 5000" })),
+                    ("intervalMs", json!({ "type": "number", "description": "轮询间隔，默认 200" })),
+                ],
+            )),
+        ),
+        Tool::new(
             "ui_tap",
             "点击 → 等稳定 → 与点击前比对，一次返回变化的点坐标。验证交互是否生效用它。",
             schema(merge(
@@ -277,7 +413,7 @@ mod tests {
     #[test]
     fn every_tool_has_object_schema() {
         let tools = tool_list();
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 21);
         for tool in &tools {
             assert!(tool.description.is_some(), "{} 缺少描述", tool.name);
             assert_eq!(
@@ -314,6 +450,9 @@ mod tests {
         assert_eq!(required(find("ui_pixel")), vec!["shot", "points"]);
         assert_eq!(required(find("ui_diff")), vec!["before", "after"]);
         assert_eq!(required(find("ui_click")), vec!["x", "y"]);
+        assert_eq!(required(find("ui_actions")), vec!["path"]);
+        assert_eq!(required(find("ui_press")), vec!["path"]);
+        assert_eq!(required(find("ui_set_value")), vec!["path", "value"]);
         assert!(required(find("ui_doctor")).is_empty());
     }
 }

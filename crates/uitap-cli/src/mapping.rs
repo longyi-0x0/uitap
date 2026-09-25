@@ -4,9 +4,10 @@ use std::path::PathBuf;
 
 use uitap_core::backend::{CaptureTarget, MouseButton};
 use uitap_core::geom::Point;
+use uitap_core::backend::{ElementAction, TreeLimits};
 use uitap_ops::{
-    ActivateRequest, AnchorOverride, CropRequest, DiffRequest, PixelRequest, ScrollRequest,
-    ShotRequest, TapRequest, Units, WaitParams, WindowQuery,
+    ActivateRequest, AnchorOverride, AppTarget, CropRequest, DiffRequest, ElementQuery,
+    PixelRequest, ScrollRequest, ShotRequest, TapRequest, Units, WaitParams, WindowQuery,
 };
 
 use crate::args::Args;
@@ -148,4 +149,56 @@ pub fn activate_request(a: &Args) -> ActivateRequest {
         pid: a.str("pid").and_then(|v| v.parse().ok()),
         window: a.str("window").and_then(|v| v.parse().ok()),
     }
+}
+
+// ---------------------------------------------------------------- 元素
+
+/// 元素操作的目标：`--app` / `--pid` / `--window` 三选一，与观测类命令一致。
+pub fn app_target(a: &Args) -> AppTarget {
+    AppTarget::from_parts(
+        a.str("app").map(str::to_string),
+        a.str("pid").and_then(|v| v.parse().ok()),
+        a.str("window").and_then(|v| v.parse().ok()),
+    )
+    .unwrap_or_else(|| fail_target())
+}
+
+fn fail_target() -> ! {
+    crate::out::fail("--app、--pid 或 --window 至少给一个，用来确定目标应用")
+}
+
+pub fn tree_limits(a: &Args) -> TreeLimits {
+    let defaults = TreeLimits::default();
+    TreeLimits {
+        max_depth: a.int("depth", defaults.max_depth as i64).max(0) as usize,
+        max_nodes: a.int("maxNodes", defaults.max_nodes as i64).max(1) as usize,
+    }
+}
+
+pub fn element_query(a: &Args) -> ElementQuery {
+    ElementQuery {
+        role: a.str("role").map(str::to_string),
+        subrole: a.str("subrole").map(str::to_string),
+        title: a.str("title").map(str::to_string),
+        value: a.str("value").map(str::to_string),
+        identifier: a.str("identifier").map(str::to_string),
+        enabled_only: a.flag("enabled"),
+    }
+}
+
+/// `--window` 限定元素树范围；给 `--pid`/`--app` 时不限定。
+pub fn element_window(a: &Args) -> Option<u64> {
+    if a.str("pid").is_some() || a.str("app").is_some() {
+        return None;
+    }
+    a.str("window").and_then(|v| v.parse().ok())
+}
+
+pub fn element_action(a: &Args) -> ElementAction {
+    let text = a.str("action").unwrap_or("press");
+    ElementAction::parse(text).unwrap_or_else(|| {
+        crate::out::fail(format!(
+            "未知动作：{text}（可用：press / showMenu / increment / decrement / confirm / cancel / pick）"
+        ))
+    })
 }

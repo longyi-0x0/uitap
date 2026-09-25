@@ -6,6 +6,11 @@
 
 use std::ffi::c_void;
 
+// ---- AXValue 承载的类型 ----
+pub const kAXValueTypeCGPoint: u32 = 1;
+pub const kAXValueTypeCGSize: u32 = 2;
+pub const kAXValueTypeCGRect: u32 = 3;
+
 pub type CGDirectDisplayID = u32;
 pub type CGWindowID = u32;
 pub type CGWindowListOption = u32;
@@ -25,6 +30,8 @@ pub type CFRunLoopRef = *mut c_void;
 pub type AXUIElementRef = *mut c_void;
 pub type CFBooleanRef = *const c_void;
 pub type CFIndex = isize;
+pub type CFTypeID = usize;
+pub type AXValueRef = *mut c_void;
 pub type CFRunLoopMode = CFStringRef;
 
 #[repr(C)]
@@ -147,6 +154,22 @@ extern "C" {
         attribute: CFStringRef,
         value: *mut CFTypeRef,
     ) -> i32;
+    /// 执行元素支持的动作（AXPress、AXIncrement 等），返回 AXError。
+    pub fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> i32;
+    /// 取元素支持的动作名列表，调用方负责释放。
+    pub fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFArrayRef) -> i32;
+    /// 取元素所属进程。
+    pub fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
+    /// 取屏幕某点下的元素，调用方负责释放。
+    pub fn AXUIElementCopyElementAtPosition(
+        application: AXUIElementRef,
+        x: f32,
+        y: f32,
+        element: *mut AXUIElementRef,
+    ) -> i32;
+
+    /// 解出 AXValue 承载的几何值（CGPoint / CGSize / CGRect）。
+    pub fn AXValueGetValue(value: AXValueRef, the_type: u32, out: *mut c_void) -> bool;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -157,6 +180,10 @@ extern "C" {
     /// 让出控制权一小段时间，期间处理系统派发到本进程的事件。
     pub fn CFRunLoopRunInMode(mode: CFRunLoopMode, seconds: f64, return_after_source_handled: bool) -> i32;
     pub fn CFRelease(cf: CFTypeRef);
+    /// 取 +1 引用。
+    pub fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
+    /// 两个 CF 对象是否等价（用于比较 AXUIElement 身份）。
+    pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> bool;
     pub fn CFArrayGetCount(array: CFArrayRef) -> isize;
     pub fn CFArrayGetValueAtIndex(array: CFArrayRef, index: isize) -> CFTypeRef;
     pub fn CFDictionaryGetValue(dict: CFDictionaryRef, key: *const c_void) -> CFTypeRef;
@@ -175,6 +202,15 @@ extern "C" {
         c_str: *const u8,
         encoding: u32,
     ) -> CFStringRef;
+
+    /// 类型判定。AX 属性返回的 CFTypeRef 必须先问类型再取值。
+    pub fn CFGetTypeID(cf: CFTypeRef) -> CFTypeID;
+    pub fn CFStringGetTypeID() -> CFTypeID;
+    pub fn CFArrayGetTypeID() -> CFTypeID;
+    pub fn CFNumberGetTypeID() -> CFTypeID;
+    pub fn CFBooleanGetTypeID() -> CFTypeID;
+    pub fn AXValueGetTypeID() -> CFTypeID;
+    pub fn CFBooleanGetValue(boolean: CFBooleanRef) -> bool;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
