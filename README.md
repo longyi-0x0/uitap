@@ -34,6 +34,15 @@ python3 parity.py                   # 与 Swift 版逐字节对拍
 
 `parity.py` 自己生成测试图，只依赖标准库。它对同一组命令跑两个二进制并比对归一化后的 JSON，动态字段（文件路径、时间戳）除外。
 
+对拍需要先编译 `legacy-swift/` 里的 Swift 版作为基准：
+
+```bash
+swift build -c release --package-path legacy-swift
+python3 parity.py
+```
+
+不编译也可以，`parity.py` 会指明缺哪个二进制。
+
 ## 两个平台约束
 
 写在实现里，改动相关代码前先读这两条。

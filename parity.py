@@ -102,10 +102,15 @@ def main() -> int:
 
     rust = Path(args.rust)
     swift = Path(args.swift)
-    for name, path in (("rust", rust), ("swift", swift)):
-        if not path.exists():
+    missing = [(name, path) for name, path in (("rust", rust), ("swift", swift)) if not path.exists()]
+    if missing:
+        for name, path in missing:
             print(f"缺少 {name} 二进制：{path}", file=sys.stderr)
-            return 2
+        print("\n先构建：", file=sys.stderr)
+        print("  cargo build --release", file=sys.stderr)
+        if any(name == "swift" for name, _ in missing):
+            print("  swift build -c release --package-path legacy-swift", file=sys.stderr)
+        return 2
 
     work = Path(tempfile.mkdtemp(prefix="uitap-parity-"))
     try:
