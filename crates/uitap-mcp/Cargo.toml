@@ -1,0 +1,17 @@
+[package]
+name = "uitap-mcp"
+description = "MCP server：把操作层包成模型可直接调用的工具"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+uitap-core.workspace = true
+uitap-ops.workspace = true
+uitap-platform.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+rmcp = { version = "3.4.1", features = ["server", "transport-io"] }
+anyhow = "1"

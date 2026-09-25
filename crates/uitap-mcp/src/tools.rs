@@ -1,0 +1,319 @@
+//! 工具声明。名称、描述与 JSON Schema 与既有 MCP 契约保持一致。
+
+use std::sync::Arc;
+
+use rmcp::model::{JsonObject, Tool};
+use serde_json::{json, Value};
+
+fn schema(value: Value) -> Arc<JsonObject> {
+    match value {
+        Value::Object(map) => Arc::new(map),
+        _ => Arc::new(JsonObject::new()),
+    }
+}
+
+fn object(properties: Value, required: &[&str]) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert("type".into(), Value::String("object".into()));
+    map.insert("properties".into(), properties);
+    if !required.is_empty() {
+        map.insert(
+            "required".into(),
+            Value::Array(required.iter().map(|k| Value::String((*k).into())).collect()),
+        );
+    }
+    Value::Object(map)
+}
+
+fn point_array(description: &str) -> Value {
+    json!({ "type": "array", "items": { "type": "number" }, "description": description })
+}
+
+/// 观测目标三选一：窗口 id、屏幕区域、显示器序号。
+fn target_properties() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "window",
+            json!({ "type": "number", "description": "窗口 id（ui_windows 的 id 字段）" }),
+        ),
+        (
+            "region",
+            point_array("[x, y, w, h] 全局点坐标"),
+        ),
+        (
+            "display",
+            json!({ "type": "number", "description": "显示器序号（ui_screens 的 index 字段）" }),
+        ),
+    ]
+}
+
+/// 等待稳定相关参数，`ui_tap` 与 `ui_wait_stable` 共用。
+fn wait_properties() -> Vec<(&'static str, Value)> {
+    vec![
+        ("timeoutMs", json!({ "type": "number", "description": "等待上限，默认 4000" })),
+        (
+            "threshold",
+            json!({ "type": "number", "description": "判定静止的变化比例上限，默认 0.0006" }),
+        ),
+        (
+            "stableSamples",
+            json!({ "type": "number", "description": "连续静止帧数，默认 2" }),
+        ),
+    ]
+}
+
+/// 合并两组属性为一个完整的 object schema。
+fn merge(base: &[(&str, Value)], extra: &[(&str, Value)]) -> Value {
+    let mut map = serde_json::Map::new();
+    for (key, value) in base.iter().chain(extra.iter()) {
+        map.insert((*key).to_string(), value.clone());
+    }
+    object(Value::Object(map), &[])
+}
+
+pub fn tool_list() -> Vec<Tool> {
+    vec![
+        Tool::new(
+            "ui_doctor",
+            "检查屏幕录制与辅助功能授权状态。授权缺失时先看这里。",
+            schema(object(json!({}), &[])),
+        ),
+        Tool::new(
+            "ui_screens",
+            "列出显示器：bounds 为点坐标、pixels 为像素、scale 为倍率。",
+            schema(object(json!({}), &[])),
+        ),
+        Tool::new(
+            "ui_windows",
+            "列出窗口。按面积降序，同尺寸时按前后叠放（z 越小越靠前），默认返回 25 个。用 id 做后续截图与激活。",
+            schema(object(
+                json!({
+                    "app": { "type": "string", "description": "按应用名模糊过滤" },
+                    "title": { "type": "string", "description": "按标题模糊过滤" },
+                    "all": { "type": "boolean", "description": "含不在当前 Space 的窗口" },
+                    "frontOnly": { "type": "boolean", "description": "只看前台应用的窗口" },
+                    "minWidth": { "type": "number" },
+                    "minHeight": { "type": "number" },
+                    "layer": { "type": "number", "description": "只看指定窗口层级（0 为普通窗口）" },
+                    "limit": { "type": "number", "description": "返回条数上限，默认 25" },
+                }),
+                &[],
+            )),
+        ),
+        Tool::new(
+            "ui_shot",
+            "截图并返回锚点（origin/scale）与短 id。默认不返回图像，需要看图时传 includeImage。",
+            schema(merge(
+                &target_properties(),
+                &[
+                    ("includeImage", json!({ "type": "boolean", "description": "true 时附带缩放后的图像副本" })),
+                    ("maxPx", json!({ "type": "number", "description": "图像副本最长边，默认 1280" })),
+                    ("path", json!({ "type": "string", "description": "指定输出路径" })),
+                ],
+            )),
+        ),
+        Tool::new(
+            "ui_zoom",
+            "放大看某张截图的局部：按点坐标裁剪并缩放后返回图像，用于辨认细节。",
+            schema(object(
+                json!({
+                    "shot": { "type": "string", "description": "截图 id 或路径" },
+                    "region": point_array("[x, y, w, h] 全局点坐标，省略则整图"),
+                    "maxPx": { "type": "number", "description": "最长边，默认 1400" },
+                }),
+                &["shot"],
+            )),
+        ),
+        Tool::new(
+            "ui_pixel",
+            "取若干个点的颜色，返回 #RRGGBB。给 expect 可直接得到颜色是否匹配的判定。",
+            schema(object(
+                json!({
+                    "shot": { "type": "string", "description": "截图 id 或路径" },
+                    "points": {
+                        "type": "array",
+                        "description": "全局点坐标数组，形如 [[x, y], ...]",
+                        "items": { "type": "array", "items": { "type": "number" } },
+                    },
+                    "expect": {
+                        "type": "array",
+                        "description": "与 points 一一对应的期望颜色，如 [\"#FF0000\"]；给出后每点附带 match 布尔值",
+                        "items": { "type": "string" },
+                    },
+                    "tolerance": { "type": "number", "description": "expect 的单通道容差，默认 12" },
+                }),
+                &["shot", "points"],
+            )),
+        ),
+        Tool::new(
+            "ui_diff",
+            "比对两张截图，返回变化区域的点坐标。验证界面是否响应首选这个。",
+            schema(object(
+                json!({
+                    "before": { "type": "string", "description": "截图 id 或路径" },
+                    "after": { "type": "string", "description": "截图 id 或路径" },
+                    "region": point_array("只比对 [x, y, w, h] 点坐标范围"),
+                    "threshold": { "type": "number", "description": "单像素视为变化的色差阈值，默认 24" },
+                    "maxRegions": { "type": "number", "description": "返回区域数上限，默认 6" },
+                    "minPixels": { "type": "number", "description": "区域最小像素数，默认 12" },
+                }),
+                &["before", "after"],
+            )),
+        ),
+        Tool::new(
+            "ui_wait_stable",
+            "等画面不再变化（动画、加载结束）。点完东西再观察前先调它。",
+            schema(merge(
+                &target_properties(),
+                &[
+                    ("timeoutMs", json!({ "type": "number", "description": "等待上限，默认 4000" })),
+                    ("threshold", json!({ "type": "number", "description": "判定静止的变化比例上限，默认 0.0006" })),
+                    ("stableSamples", json!({ "type": "number", "description": "连续静止帧数，默认 2" })),
+                    ("intervalMs", json!({ "type": "number", "description": "采样间隔，默认 120" })),
+                ],
+            )),
+        ),
+        Tool::new(
+            "ui_click",
+            "在全局点坐标处点击。",
+            schema(object(
+                json!({
+                    "x": { "type": "number" },
+                    "y": { "type": "number" },
+                    "button": { "type": "string", "enum": ["left", "right", "middle"] },
+                    "count": { "type": "number", "description": "连击次数，2 为双击" },
+                }),
+                &["x", "y"],
+            )),
+        ),
+        Tool::new(
+            "ui_drag",
+            "从一点拖到另一点。",
+            schema(object(
+                json!({
+                    "from": point_array("起点"),
+                    "to": point_array("终点"),
+                    "durationMs": { "type": "number", "description": "拖动时长，默认 300" },
+                    "button": { "type": "string", "enum": ["left", "right", "middle"] },
+                }),
+                &["from", "to"],
+            )),
+        ),
+        Tool::new(
+            "ui_scroll",
+            "滚动滚轮。dy 为正向上滚，dx 为正向右滚。",
+            schema(object(
+                json!({
+                    "at": point_array("先移到该点再滚"),
+                    "dy": { "type": "number" },
+                    "dx": { "type": "number" },
+                }),
+                &[],
+            )),
+        ),
+        Tool::new(
+            "ui_type",
+            "键入文本（支持中文）。目标应用需已获得焦点。",
+            schema(object(
+                json!({
+                    "text": { "type": "string" },
+                    "delayMs": { "type": "number", "description": "逐字间隔，默认 0；应用丢字时调大" },
+                }),
+                &["text"],
+            )),
+        ),
+        Tool::new(
+            "ui_key",
+            "按组合键，如 \"cmd+shift+t\"、\"esc\"、\"return\"。",
+            schema(object(
+                json!({
+                    "combo": { "type": "string" },
+                    "repeat": { "type": "number" },
+                }),
+                &["combo"],
+            )),
+        ),
+        Tool::new(
+            "ui_activate",
+            "把应用切到前台。app / pid / window 三选一。",
+            schema(object(
+                json!({
+                    "app": { "type": "string", "description": "应用名或 bundle id" },
+                    "pid": { "type": "number" },
+                    "window": { "type": "number", "description": "窗口 id，取其所属应用" },
+                }),
+                &[],
+            )),
+        ),
+        Tool::new(
+            "ui_tap",
+            "点击 → 等稳定 → 与点击前比对，一次返回变化的点坐标。验证交互是否生效用它。",
+            schema(merge(
+                &{
+                    let mut props = vec![
+                        ("x", json!({ "type": "number" })),
+                        ("y", json!({ "type": "number" })),
+                    ];
+                    props.extend(target_properties());
+                    props.extend(wait_properties());
+                    props
+                },
+                &[
+                    ("settleMs", json!({ "type": "number", "description": "点击后先等的时间，默认 120" })),
+                    ("button", json!({ "type": "string", "enum": ["left", "right", "middle"] })),
+                    ("count", json!({ "type": "number" })),
+                    ("includeImage", json!({ "type": "boolean", "description": "true 时附带变化后的截图" })),
+                    ("maxPx", json!({ "type": "number" })),
+                ],
+            )),
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_tool_has_object_schema() {
+        let tools = tool_list();
+        assert_eq!(tools.len(), 15);
+        for tool in &tools {
+            assert!(tool.description.is_some(), "{} 缺少描述", tool.name);
+            assert_eq!(
+                tool.input_schema.get("type").and_then(Value::as_str),
+                Some("object"),
+                "{} 的 schema 不是 object",
+                tool.name
+            );
+            assert!(
+                tool.input_schema.contains_key("properties"),
+                "{} 缺少 properties",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn required_fields_are_declared() {
+        let tools = tool_list();
+        let find = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("missing tool {name}"))
+        };
+        let required = |tool: &Tool| -> Vec<String> {
+            tool.input_schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default()
+        };
+
+        assert_eq!(required(find("ui_pixel")), vec!["shot", "points"]);
+        assert_eq!(required(find("ui_diff")), vec!["before", "after"]);
+        assert_eq!(required(find("ui_click")), vec!["x", "y"]);
+        assert!(required(find("ui_doctor")).is_empty());
+    }
+}

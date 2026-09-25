@@ -1,0 +1,13 @@
+[package]
+name = "uitap-macos"
+description = "macOS 后端：CoreGraphics 观测与输入合成"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+uitap-core.workspace = true
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"

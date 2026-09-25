@@ -1,0 +1,13 @@
+[package]
+name = "uitap-platform"
+description = "按目标平台选择后端，并暴露平台专属能力"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+uitap-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+uitap-macos.workspace = true

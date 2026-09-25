@@ -1,0 +1,11 @@
+[package]
+name = "uitap-ops"
+description = "平台无关的操作层：编排后端调用并产出 JSON 契约"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+uitap-core.workspace = true
+serde_json.workspace = true

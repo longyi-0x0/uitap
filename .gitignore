@@ -1,0 +1,8 @@
+# Rust 构建产物
+target/
+
+# legacy-swift 的构建产物
+legacy-swift/.build/
+bin/
+
+Package.resolved

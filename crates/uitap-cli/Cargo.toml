@@ -1,0 +1,19 @@
+[package]
+name = "uitap-cli"
+description = "uitap 命令行，输出单行 JSON；同时提供 mcp 子命令"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "uitap"
+path = "src/main.rs"
+
+[dependencies]
+uitap-core.workspace = true
+uitap-ops.workspace = true
+uitap-platform.workspace = true
+uitap-mcp.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread"] }

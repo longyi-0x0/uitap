@@ -1,0 +1,533 @@
+//! MCP server：把操作层包成模型可直接调用的工具。
+//!
+//! 与既有契约保持一致的两点：截图默认只回锚点与短 id（不带图像，省 token），
+//! 以及错误以工具级内容返回而不是协议错误（调用方能看到可操作的信息）。
+
+mod extract;
+mod tools;
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use base64::Engine;
+use serde_json::{Map, Value};
+
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig,
+};
+use rmcp::service::{RequestContext, RoleServer, ServiceExt};
+use rmcp::{ErrorData, ServerHandler};
+
+use uitap_core::backend::CaptureTarget;
+use uitap_core::geom::Rect;
+use uitap_ops::{
+    image, input, observe, tap as tap_op, wait, ActivateRequest, AnchorOverride, CropRequest,
+    DiffRequest, PixelRequest, ScrollRequest, ShotRequest, TapRequest, Units, WaitParams,
+    WindowQuery,
+};
+use uitap_platform::{capture_available, open, parse_combo, Current};
+
+/// 最近的截图登记表：短 id 代替长路径，省 token。进程生命周期内有效。
+#[derive(Default)]
+struct ShotRegistry {
+    next: u64,
+    paths: HashMap<String, PathBuf>,
+}
+
+impl ShotRegistry {
+    fn register(&mut self, path: &Path) -> String {
+        self.next += 1;
+        let id = format!("s{}", self.next);
+        self.paths.insert(id.clone(), path.to_path_buf());
+        id
+    }
+
+    /// 截图 id 或文件路径都能用。未知 id 原样返回，让下层报出「文件不存在」。
+    fn resolve(&self, reference: &str) -> PathBuf {
+        match self.paths.get(reference) {
+            Some(path) => path.clone(),
+            None => PathBuf::from(reference),
+        }
+    }
+}
+
+struct UitapServer {
+    shots: Arc<Mutex<ShotRegistry>>,
+}
+
+impl UitapServer {
+    fn new() -> Self {
+        Self {
+            shots: Arc::new(Mutex::new(ShotRegistry::default())),
+        }
+    }
+}
+
+impl ServerHandler for UitapServer {
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
+            rmcp::model::Implementation::new("uitap", env!("CARGO_PKG_VERSION")),
+        )
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(ListToolsResult::with_all_items(tools::tool_list()))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let shots = self.shots.clone();
+        let name = request.name.to_string();
+        let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+
+        // 操作层会起子进程、sleep 与读图，放到阻塞线程池里，别占住异步执行器。
+        let outcome = tokio::task::spawn_blocking(move || dispatch(&shots, &name, &args))
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("tool task failed: {e}"), None))?;
+
+        Ok(match outcome {
+            Ok(blocks) => CallToolResponse::from(CallToolResult::success(blocks)),
+            Err(message) => CallToolResponse::from(CallToolResult::error(vec![ContentBlock::text(
+                format!("错误：{message}"),
+            )])),
+        })
+    }
+}
+
+/// 起 stdio MCP server，直到客户端断开。
+pub async fn serve() -> anyhow::Result<()> {
+    let service = UitapServer::new()
+        .serve(rmcp::transport::io::stdio())
+        .await
+        .map_err(|e| anyhow::anyhow!("initialize failed: {e}"))?;
+    service.waiting().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- 工具分发
+
+fn dispatch(
+    shots: &Arc<Mutex<ShotRegistry>>,
+    name: &str,
+    args: &Value,
+) -> Result<Vec<ContentBlock>, String> {
+    let backend: Current = open();
+    match name {
+        "ui_doctor" => Ok(vec![text(observe::doctor(&backend, capture_available()))]),
+
+        "ui_screens" => Ok(vec![text(observe::screens(&backend)?)]),
+
+        "ui_windows" => {
+            let query = WindowQuery {
+                app: extract::string(args, "app"),
+                title: extract::string(args, "title"),
+                all: extract::flag(args, "all"),
+                front_only: extract::flag(args, "frontOnly"),
+                min_width: extract::number(args, "minWidth").unwrap_or(0.0),
+                min_height: extract::number(args, "minHeight").unwrap_or(0.0),
+                layer: extract::integer(args, "layer").map(|v| v as i32),
+                limit: Some(
+                    extract::integer(args, "limit")
+                        .filter(|v| *v >= 0)
+                        .unwrap_or(25) as usize,
+                ),
+            };
+            Ok(vec![text(observe::windows(&backend, &query)?)])
+        }
+
+        "ui_shot" => {
+            let request = ShotRequest {
+                target: target(args)?,
+                path: extract::string(args, "path").map(PathBuf::from),
+                max_px: extract::integer(args, "maxPx").map(|v| v.max(0) as usize),
+                tag: "shot".to_string(),
+            };
+            let outcome = image::shot(&backend, &request)?;
+            let mut payload = outcome.json();
+            let id = shots
+                .lock()
+                .map_err(|_| "截图登记表不可用".to_string())?
+                .register(outcome.path());
+            if let Value::Object(map) = &mut payload {
+                map.insert("id".into(), Value::String(id));
+            }
+
+            let mut blocks = vec![text(payload)];
+            if extract::flag(args, "includeImage") {
+                let max_px = extract::integer(args, "maxPx").unwrap_or(1280) as usize;
+                blocks.push(image_block(outcome.path(), None, max_px)?);
+            }
+            Ok(blocks)
+        }
+
+        "ui_zoom" => {
+            let source = resolve(shots, args, "shot")?;
+            let max_px = extract::integer(args, "maxPx").unwrap_or(1400).max(1) as usize;
+            let region = extract::rect(args, "region");
+            Ok(vec![image_block(&source, region, max_px)?])
+        }
+
+        "ui_pixel" => {
+            let request = PixelRequest {
+                path: resolve(shots, args, "shot")?,
+                points: extract::points(args, "points"),
+                units: Some(Units::Point),
+                anchor_override: AnchorOverride::default(),
+            };
+            let mut payload = image::pixel(&request)?;
+
+            // 期望色断言在服务端完成，模型只需读布尔值。
+            if let Some(expect) = args.get("expect").and_then(Value::as_array) {
+                let tolerance = extract::number(args, "tolerance").unwrap_or(12.0);
+                annotate_matches(&mut payload, expect, tolerance);
+            }
+            Ok(vec![text(payload)])
+        }
+
+        "ui_diff" => {
+            let mut request = DiffRequest::new(resolve(shots, args, "before")?, resolve(shots, args, "after")?);
+            request.threshold = extract::integer(args, "threshold").map(|v| v as i32);
+            request.min_pixels = extract::integer(args, "minPixels").map(|v| v.max(0) as usize);
+            request.max_regions = extract::integer(args, "maxRegions").map(|v| v.max(0) as usize);
+            request.region = extract::rect(args, "region");
+            request.units = Some(Units::Point);
+            Ok(vec![text(image::diff(&request)?)])
+        }
+
+        "ui_wait_stable" => {
+            let params = wait_params(args);
+            Ok(vec![text(wait::wait_stable_json(
+                &backend,
+                &target(args)?,
+                &params,
+            )?)])
+        }
+
+        "ui_click" => {
+            let point = uitap_core::geom::Point::new(
+                extract::required_number(args, "x")?,
+                extract::required_number(args, "y")?,
+            );
+            let count = extract::integer(args, "count").unwrap_or(1).max(1) as u32;
+            Ok(vec![text(input::click(
+                &backend,
+                point,
+                extract::button(args),
+                count,
+            )?)])
+        }
+
+        "ui_drag" => {
+            let from = extract::required_point(args, "from")?;
+            let to = extract::required_point(args, "to")?;
+            let duration = extract::integer(args, "durationMs").unwrap_or(300).max(0) as u64;
+            Ok(vec![text(input::drag(
+                &backend,
+                from,
+                to,
+                extract::button(args),
+                duration,
+            )?)])
+        }
+
+        "ui_scroll" => {
+            let request = ScrollRequest {
+                at: extract::point(args, "at"),
+                dx: extract::integer(args, "dx").unwrap_or(0) as i32,
+                dy: extract::integer(args, "dy").unwrap_or(0) as i32,
+            };
+            Ok(vec![text(input::scroll(&backend, &request)?)])
+        }
+
+        "ui_type" => {
+            let text_value = extract::required_string(args, "text")?;
+            let delay = extract::integer(args, "delayMs").unwrap_or(0).max(0) as u64;
+            Ok(vec![text(input::type_text(&backend, &text_value, delay)?)])
+        }
+
+        "ui_key" => {
+            let combo = extract::required_string(args, "combo")?;
+            let (key_code, modifiers, _name) = parse_combo(&combo)
+                .ok_or_else(|| format!("unrecognized combo: {combo}"))?;
+            let repeat = extract::integer(args, "repeat").unwrap_or(1).max(1) as u32;
+            Ok(vec![text(input::key(
+                &backend,
+                &combo,
+                key_code,
+                &modifiers,
+                repeat,
+            )?)])
+        }
+
+        "ui_activate" => {
+            let request = ActivateRequest {
+                app: extract::string(args, "app"),
+                pid: extract::integer(args, "pid").map(|v| v as i32),
+                window: extract::integer(args, "window").map(|v| v as u64),
+            };
+            Ok(vec![text(input::activate(&backend, &request)?)])
+        }
+
+        "ui_tap" => {
+            let at = uitap_core::geom::Point::new(
+                extract::required_number(args, "x")?,
+                extract::required_number(args, "y")?,
+            );
+            let request = TapRequest {
+                at,
+                target: target(args)?,
+                button: extract::button(args),
+                count: extract::integer(args, "count").unwrap_or(1).max(1) as u32,
+                settle_ms: extract::integer(args, "settleMs").unwrap_or(120).max(0) as u64,
+                wait: wait_params(args),
+                units: Some(Units::Point),
+                keep: false,
+            };
+            let payload = tap_op::tap(&backend, &request)?;
+
+            if extract::flag(args, "includeImage") {
+                let after = image::shot(&backend, &ShotRequest {
+                    target: request.target.clone(),
+                    path: None,
+                    max_px: None,
+                    tag: "tap-after".to_string(),
+                })?;
+                let max_px = extract::integer(args, "maxPx").unwrap_or(1280).max(1) as usize;
+                return Ok(vec![text(payload), image_block(after.path(), None, max_px)?]);
+            }
+            Ok(vec![text(payload)])
+        }
+
+        other => Err(format!("未知工具：{other}")),
+    }
+}
+
+// ---------------------------------------------------------------- 辅助
+
+fn text(value: Value) -> ContentBlock {
+    ContentBlock::text(compact(&value).to_string())
+}
+
+fn target(args: &Value) -> Result<CaptureTarget, String> {
+    if let Some(window) = extract::integer(args, "window") {
+        return Ok(CaptureTarget::Window(window as u64));
+    }
+    if let Some(region) = extract::rect(args, "region") {
+        return Ok(CaptureTarget::Region(region));
+    }
+    if let Some(display) = extract::integer(args, "display") {
+        return Ok(CaptureTarget::Screen {
+            display_index: Some(display.max(0) as usize),
+        });
+    }
+    Ok(CaptureTarget::Screen {
+        display_index: None,
+    })
+}
+
+fn wait_params(args: &Value) -> WaitParams {
+    WaitParams {
+        interval_ms: extract::integer(args, "intervalMs").unwrap_or(120).max(40) as u64,
+        timeout_ms: extract::integer(args, "timeoutMs").unwrap_or(4000).max(200) as u64,
+        ratio_threshold: extract::number(args, "threshold").unwrap_or(0.0006),
+        stable_samples: extract::integer(args, "stableSamples").unwrap_or(2).max(1) as usize,
+    }
+}
+
+fn resolve(
+    shots: &Arc<Mutex<ShotRegistry>>,
+    args: &Value,
+    key: &str,
+) -> Result<PathBuf, String> {
+    let reference = extract::required_string(args, key)?;
+    let registry = shots.lock().map_err(|_| "截图登记表不可用".to_string())?;
+    Ok(registry.resolve(&reference))
+}
+
+/// 生成给模型看的缩放副本，不动原图，因此像素换算仍基于原图。
+fn image_block(source: &Path, region_points: Option<Rect>, max_px: usize) -> Result<ContentBlock, String> {
+    let output = PathBuf::from(format!(
+        "{}-view.png",
+        source.to_string_lossy().trim_end_matches(".png")
+    ));
+
+    let request = CropRequest {
+        input: source.to_path_buf(),
+        output: Some(output.clone()),
+        region: None,
+        region_points,
+        max_px: Some(max_px),
+        anchor_override: AnchorOverride::default(),
+    };
+    let _ = image::crop(&request)?;
+
+    let bytes = std::fs::read(&output).map_err(|e| format!("cannot read {}: {e}", output.display()))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(ContentBlock::image(encoded, "image/png"))
+}
+
+/// 期望色断言：给每点加 `match`，并汇总 `allMatch`。
+fn annotate_matches(payload: &mut Value, expect: &[Value], tolerance: f64) {
+    let Some(points) = payload.get_mut("points").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    let mut compared = 0usize;
+    let mut matched = 0usize;
+    for (index, point) in points.iter_mut().enumerate() {
+        let Some(target) = expect.get(index).and_then(parse_hex) else {
+            continue;
+        };
+        let Some(actual) = point.get("hex").and_then(parse_hex) else {
+            continue;
+        };
+        let is_match = actual
+            .iter()
+            .zip(target.iter())
+            .all(|(a, b)| (*a as f64 - *b as f64).abs() <= tolerance);
+        if let Value::Object(map) = point {
+            map.insert("match".into(), Value::Bool(is_match));
+        }
+        compared += 1;
+        if is_match {
+            matched += 1;
+        }
+    }
+
+    if compared > 0 {
+        if let Value::Object(map) = payload {
+            map.insert("allMatch".into(), Value::Bool(matched == compared));
+        }
+    }
+}
+
+fn parse_hex(value: &Value) -> Option<[u8; 3]> {
+    // 也接受 [r, g, b] 形式。
+    if let Some(array) = value.as_array() {
+        if array.len() >= 3 {
+            return Some([
+                clamp_channel(array[0].as_f64()?),
+                clamp_channel(array[1].as_f64()?),
+                clamp_channel(array[2].as_f64()?),
+            ]);
+        }
+        return None;
+    }
+
+    let text = value.as_str()?.trim_start_matches('#');
+    if text.len() != 6 || !text.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 3];
+    for (index, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+fn clamp_channel(value: f64) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
+
+/// 去掉空串、null 与空数组，压低返回体积。布尔值保留，避免语义丢失。
+fn compact(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(compact).collect()),
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (key, raw) in map {
+                let pruned = compact(raw);
+                let drop = match &pruned {
+                    Value::String(s) => s.is_empty(),
+                    Value::Null => true,
+                    Value::Array(items) => items.is_empty(),
+                    _ => false,
+                };
+                if !drop {
+                    out.insert(key.clone(), pruned);
+                }
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn resolves_registered_shot_id() {
+        let mut registry = ShotRegistry::default();
+        let path = PathBuf::from("/tmp/uitap/a.png");
+        let id = registry.register(&path);
+        assert_eq!(id, "s1");
+        assert_eq!(registry.resolve("s1"), path);
+        // 未知引用原样返回，让下层报「文件不存在」。
+        assert_eq!(registry.resolve("/other/b.png"), PathBuf::from("/other/b.png"));
+    }
+
+    #[test]
+    fn compact_drops_empty_values() {
+        let value = json!({
+            "keep": 1,
+            "emptyString": "",
+            "nullValue": null,
+            "emptyArray": [],
+            "nested": { "ok": true, "drop": [] },
+            "falseKept": false,
+        });
+        let pruned = compact(&value);
+        assert_eq!(
+            pruned,
+            json!({ "keep": 1, "nested": { "ok": true }, "falseKept": false })
+        );
+    }
+
+    #[test]
+    fn parses_hex_and_rgb_expectations() {
+        assert_eq!(parse_hex(&json!("#FF8000")), Some([255, 128, 0]));
+        assert_eq!(parse_hex(&json!([1, 2, 3])), Some([1, 2, 3]));
+        assert_eq!(parse_hex(&json!("xyz")), None);
+        // 越界通道被夹到 0..255
+        assert_eq!(parse_hex(&json!([-5, 300, 10.6])), Some([0, 255, 11]));
+    }
+
+    #[test]
+    fn annotates_match_flags() {
+        let mut payload = json!({
+            "units": "point",
+            "points": [
+                { "x": 5, "y": 5, "hex": "#1D1B24" },
+                { "x": 100, "y": 100, "hex": "#131414" },
+            ],
+        });
+        let expect = vec![json!("#1D1B24"), json!("#FFFFFF")];
+        annotate_matches(&mut payload, &expect, 12.0);
+
+        assert_eq!(payload["points"][0]["match"], json!(true));
+        assert_eq!(payload["points"][1]["match"], json!(false));
+        assert_eq!(payload["allMatch"], json!(false));
+    }
+
+    #[test]
+    fn tolerance_is_inclusive() {
+        let mut payload = json!({
+            "points": [{ "x": 0, "y": 0, "hex": "#0A0A0A" }],
+        });
+        annotate_matches(&mut payload, &vec![json!("#000000")], 10.0);
+        assert_eq!(payload["points"][0]["match"], json!(true));
+        assert_eq!(payload["allMatch"], json!(true));
+    }
+}
