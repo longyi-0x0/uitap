@@ -43,6 +43,22 @@ python3 parity.py
 
 不编译也可以，`parity.py` 会指明缺哪个二进制。
 
+## 元素层的边界
+
+**`AXEnabled` 不是所有角色都有。** `ui_find --enabled` 只保留该属性明确为真的元素，
+像 `AXTextArea` 这类控件常常不带这个属性，会被一起滤掉。查文本区域时不要加 `--enabled`。
+
+**路径下标会随树变化漂移。** 展开一个菜单、打开一个面板都会改变索引链。跨多次操作复用旧
+`path` 之前，先确认树没变。
+
+**自绘界面查不到元素。** 元素树来自应用自己暴露的辅助功能信息。画布类应用（部分 Flutter、
+游戏引擎、自定义渲染）通常只暴露一个大容器，这时只能走坐标路径。
+
+**遍历代价与树的大小成正比。** 每次读属性都是一次进程间调用，节点多时一次全量遍历约需 1 秒
+（Safari 约 200 个节点即在此量级）。`ui_find` / `ui_wait_for` 默认按 `maxNodes: 200` 遍历，
+限制 `depth` 与小 `maxNodes` 能显著减少耗时；`ui_wait_for` 每轮都重新遍历，超时前的轮询次数
+按这个量级估算。
+
 ## 两个平台约束
 
 写在实现里，改动相关代码前先读这两条。
@@ -100,17 +116,63 @@ Retina 上 `scale` 为 2；非 Retina 与缩放显示器为 1。
 
 ## 工具
 
-`ui_doctor`、`ui_screens`、`ui_windows`、`ui_shot`、`ui_zoom`、`ui_pixel`、`ui_diff`、`ui_wait_stable`、`ui_click`、`ui_drag`、`ui_scroll`、`ui_type`、`ui_key`、`ui_activate`、`ui_tap`。
+两组工具走的是两条不同的路径，可以混用。
 
-`ui_tap` 是「点击 → 等稳定 → 与点击前比对」的合成动作，一次调用返回变化的点坐标，替代 `ui_shot` + `ui_wait_stable` + `ui_diff` 三次往返。
+**观测与输入**（21 个中的 15 个）走屏幕像素与合成事件：能用在不暴露辅助功能信息的界面上，
+代价是必须抢前台、必须对准坐标。
 
-`ui_shot` 默认只返回锚点与短 id（`s1`、`s2`…），不带图像。要看图才传 `includeImage`，此时返回缩放后的副本，原图不受影响。后续工具可以直接用 id 替代路径。
+| 工具 | 作用 | 备注 |
+| --- | --- | --- |
+| `ui_doctor` | 授权与依赖自检 | 任何工具报权限错误时先看这个 |
+| `ui_screens` | 显示器列表 | `bounds` 是点坐标，`pixels` 是像素，`scale` 是倍率 |
+| `ui_windows` | 窗口列表 | 按面积降序，同尺寸按前后叠放（`z` 越小越前），默认 25 个 |
+| `ui_shot` | 截图 | 默认只回锚点与短 id；`includeImage` 才返回图像 |
+| `ui_zoom` | 局部放大 | 按点坐标裁剪并缩放，用于辨认细节 |
+| `ui_pixel` | 取点颜色 | 传 `expect` 时直接返回 `match` 布尔值，省掉模型侧的比较 |
+| `ui_diff` | 两张截图比对 | 返回变化区域的点坐标，验证界面是否响应首选 |
+| `ui_wait_stable` | 等画面不动 | 动画、加载结束后再观察 |
+| `ui_click` | 点击 | `count: 2` 为双击 |
+| `ui_drag` | 拖拽 | 默认 300ms 分 20 段，太快会被应用丢帧 |
+| `ui_scroll` | 滚轮 | `dy` 为正向上 |
+| `ui_type` | 键入文本 | 支持中文；应用丢字时调大 `delayMs` |
+| `ui_key` | 组合键 | 如 `cmd+shift+t`；可用 `esc`、`return`、`f5` 这类键名 |
+| `ui_activate` | 切前台 | `frontmost` 是确认过的结果，不是发出请求就算成功 |
+| `ui_tap` | 点击 → 等稳定 → 比对 | 一次调用替代 `ui_shot` + `ui_wait_stable` + `ui_diff` 三步 |
+
+**辅助功能元素**（6 个）走 macOS 的 AX 接口：按语义定位元素，**不移动鼠标、不切换前台应用**，
+也不受窗口遮挡影响。代价是依赖目标应用暴露可用的元素树，自绘界面（部分 Flutter、游戏、
+Qt 自定义绘制）往往查不到东西。
+
+| 工具 | 作用 | 备注 |
+| --- | --- | --- |
+| `ui_tree` | 读元素树 | 拍平成列表，广度优先；`depth` 默认 12、`maxNodes` 默认 200，超出时返回 `truncated` |
+| `ui_find` | 按条件查元素 | 条件（`role`/`subrole`/`title`/`value`/`identifier`）按「包含」匹配、大小写不敏感，给出的每一项都要满足 |
+| `ui_actions` | 列出元素可用动作 | 返回空数组表示该元素不可交互 |
+| `ui_press` | 对元素执行动作 | 默认 `press`（相当于点击）；失败时会列出该元素实际支持的动作 |
+| `ui_set_value` | 设置元素的值 | 可直接写入文本框，不触发键盘输入 |
+| `ui_wait_for` | 等元素出现 | 比反复截图比对省 token；空条件会被拒绝 |
+
+### 元素路径
+
+`ui_tree` 与 `ui_find` 返回的 `path` 是从应用根元素开始、逐层走子元素的索引链，如 `0.1.3`。
+它无状态：每次操作都从根重新走一遍解析，因此不需要跨调用保存句柄。树结构变了旧路径就失效，
+重新取一次即可。空路径表示应用根元素本身，它不能作为操作目标。
+
+### 什么时候用哪条路
+
+优先试元素路径：定位准、不受遮挡影响、不打断用户正在做的事。查到空树或元素没有可用动作时，
+退回坐标路径。两者可以衔接——`ui_find` 返回的 `bounds` 就是屏幕点坐标，可直接喂给 `ui_click`。
 
 ## 命令行
 
 `uitap help` 列出全部子命令。举几个：
 
 ```bash
+uitap tree --app Finder --depth 3 --maxNodes 40
+uitap find --app Finder --role AXMenuBarItem --title 文件
+uitap press --app Finder --path 0.2 --action press
+uitap wait-for --app Finder --role AXDialog --timeout 5000
+
 uitap windows --app Code --layer 0 --minWidth 800
 uitap shot --window 101664 --path /tmp/w.png
 uitap pixel --path /tmp/w.png --at 400,300 --units point
