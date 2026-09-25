@@ -51,11 +51,17 @@ const USAGE: &str = r#"uitap — 跨平台桌面观测与输入合成，输出�
   wait-for  [目标] [同 find 的条件] [--timeout MS] [--interval MS]
                                             等符合条件的元素出现
 
+  lock      [--action status|clear]          查看或清除输入互斥租约
+
   mcp                                       以 stdio 起 MCP server
 
 坐标默认是全局点坐标，左上角为原点。shot 会在 PNG 旁写同名 .json 记录 origin 与 scale，
 其后 pixel / diff 无需再指定。wait-stable 的 --threshold 是变化比例上限（默认 0.0006），
 diff 的 --threshold 是单像素色差阈值（默认 24）。
+
+输入类命令（click / move / drag / scroll / type / key / activate / tap）默认先取一次
+跨进程租约，避免多个 agent 同时驱动同一套输入。拿不到时不会干等：报告谁在占用、还需
+多久，并提示加 --wait 或稍后重试。--noLock 可关闭。
 "#;
 
 fn main() {
@@ -115,11 +121,17 @@ fn dispatch_platform(command: &str, a: &Args, backend: &uitap_platform::Current)
         "shot" => image::shot(backend, &mapping::shot_request(a, "shot")).map(|out| out.json()),
         "wait-stable" => wait::wait_stable_json(backend, &mapping::target(a), &mapping::wait_params(a)),
         "click" => match a.point("at") {
-            Some(at) => input::click(backend, at, mapping::button(a), a.int("count", 1).max(1) as u32),
+            Some(at) => input::click(
+                backend,
+                at,
+                mapping::button(a),
+                a.int("count", 1).max(1) as u32,
+                &mapping::lease_settings(a),
+            ),
             None => Err("--at x,y is required".into()),
         },
         "move" => match a.point("to") {
-            Some(to) => input::move_to(backend, to),
+            Some(to) => input::move_to(backend, to, &mapping::lease_settings(a)),
             None => Err("--to x,y is required".into()),
         },
         "drag" => match (a.point("from"), a.point("to")) {
@@ -129,16 +141,27 @@ fn dispatch_platform(command: &str, a: &Args, backend: &uitap_platform::Current)
                 to,
                 mapping::button(a),
                 a.int("duration", 300).max(0) as u64,
+                &mapping::lease_settings(a),
             ),
             _ => Err("--from x,y and --to x,y are required".into()),
         },
-        "scroll" => input::scroll(backend, &mapping::scroll_request(a)),
+        "scroll" => input::scroll(backend, &mapping::scroll_request(a), &mapping::lease_settings(a)),
         "type" => match a.str("text") {
-            Some(text) => input::type_text(backend, text, a.int("delay", 0).max(0) as u64),
+            Some(text) => input::type_text(
+                backend,
+                text,
+                a.int("delay", 0).max(0) as u64,
+                &mapping::lease_settings(a),
+            ),
             None => Err("--text is required".into()),
         },
         "key" => dispatch_key(a, backend),
-        "activate" => input::activate(backend, &mapping::activate_request(a)),
+        "activate" => input::activate(
+            backend,
+            &mapping::activate_request(a),
+            &mapping::lease_settings(a),
+        ),
+        "lock" => uitap_ops::lease::lease_report(a.str("action").unwrap_or("status")),
         "tap" => match a.point("at") {
             Some(at) => tap_op::tap(backend, &mapping::tap_request(a, at)),
             None => Err("--at x,y is required".into()),
@@ -205,7 +228,14 @@ fn dispatch_key(a: &Args, backend: &uitap_platform::Current) -> OpResult<serde_j
     let combo = a.str("combo").ok_or("--combo is required")?;
     let (key_code, modifiers, _name) =
         parse_combo(combo).ok_or_else(|| format!("unrecognized combo: {combo}"))?;
-    input::key(backend, combo, key_code, &modifiers, a.int("repeat", 1).max(1) as u32)
+    input::key(
+        backend,
+        combo,
+        key_code,
+        &modifiers,
+        a.int("repeat", 1).max(1) as u32,
+        &mapping::lease_settings(a),
+    )
 }
 
 fn run_mcp() -> ! {

@@ -7,7 +7,8 @@ use uitap_core::geom::Point;
 use uitap_core::backend::{ElementAction, TreeLimits};
 use uitap_ops::{
     ActivateRequest, AnchorOverride, AppTarget, CropRequest, DiffRequest, ElementQuery,
-    PixelRequest, ScrollRequest, ShotRequest, TapRequest, Units, WaitParams, WindowQuery,
+    LeaseSettings, PixelRequest, ScrollRequest, ShotRequest, TapRequest, Units, WaitParams,
+    WindowQuery,
 };
 
 use crate::args::Args;
@@ -128,6 +129,17 @@ pub fn tap_request(a: &Args, at: Point) -> TapRequest {
         wait: tap_wait_params(a),
         units: units(a),
         keep: a.flag("keep"),
+        lease: lease_settings(a),
+    }
+}
+
+/// 输入操作的互斥参数。默认开启，`--noLock` 关闭，`--wait MS` 调整等待预算。
+pub fn lease_settings(a: &Args) -> LeaseSettings {
+    let settings = LeaseSettings::default().with_wait(a.int("wait", 5_000).max(0) as u64);
+    if a.flag("noLock") {
+        settings.without_lock()
+    } else {
+        settings
     }
 }
 

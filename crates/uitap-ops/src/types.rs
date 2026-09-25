@@ -189,6 +189,7 @@ pub struct TapRequest {
     pub wait: WaitParams,
     pub units: Option<Units>,
     pub keep: bool,
+    pub lease: crate::lease::LeaseSettings,
 }
 
 #[derive(Clone, Debug)]

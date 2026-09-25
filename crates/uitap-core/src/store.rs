@@ -35,6 +35,14 @@ pub fn ensure_shot_dir() -> PathBuf {
 pub const FRAME_A: &str = "uitap-frame-a.png";
 pub const FRAME_B: &str = "uitap-frame-b.png";
 
+/// 跨进程租约文件。裁剪临时文件时必须放过它，否则会误删别人的持有状态。
+pub const LEASE_FILE: &str = "lease.json";
+
+/// 租约文件路径。
+pub fn lease_path() -> PathBuf {
+    ensure_shot_dir().join(LEASE_FILE)
+}
+
 pub fn frame_path(slot: u8) -> PathBuf {
     ensure_shot_dir().join(if slot == 1 { FRAME_B } else { FRAME_A })
 }
@@ -123,7 +131,7 @@ pub fn prune(keep: usize) {
         .filter(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            name != FRAME_A && name != FRAME_B
+            name != FRAME_A && name != FRAME_B && name != LEASE_FILE
         })
         .filter_map(|entry| {
             let meta = entry.metadata().ok()?;

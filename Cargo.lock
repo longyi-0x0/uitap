@@ -978,12 +978,14 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "uitap-core",
+ "uitap-platform",
 ]
 
 [[package]]
 name = "uitap-platform"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "uitap-core",
  "uitap-macos",
 ]

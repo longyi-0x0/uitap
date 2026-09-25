@@ -47,6 +47,18 @@ fn target_properties() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// 输入类工具共用的互斥参数说明。抽成常量是为了七个工具的文案不会各说各话。
+const WAIT_MS_DESC: &str = "被别的 agent 占用时最多等多久，默认 5000";
+const NO_LOCK_DESC: &str = "true 时跳过互斥检查；仅在确认无并发时用";
+
+/// 输入类工具共用的互斥参数，供 `merge` 形式的 schema 使用。
+fn lease_properties() -> Vec<(&'static str, Value)> {
+    vec![
+        ("waitMs", json!({ "type": "number", "description": WAIT_MS_DESC })),
+        ("noLock", json!({ "type": "boolean", "description": NO_LOCK_DESC })),
+    ]
+}
+
 /// 元素类工具的目标：应用名 / pid / 窗口 id 三选一。
 fn app_target_properties() -> Vec<(&'static str, Value)> {
     vec![
@@ -229,6 +241,8 @@ pub fn tool_list() -> Vec<Tool> {
                     "y": { "type": "number" },
                     "button": { "type": "string", "enum": ["left", "right", "middle"] },
                     "count": { "type": "number", "description": "连击次数，2 为双击" },
+                    "waitMs": { "type": "number", "description": WAIT_MS_DESC },
+                    "noLock": { "type": "boolean", "description": NO_LOCK_DESC },
                 }),
                 &["x", "y"],
             )),
@@ -242,6 +256,8 @@ pub fn tool_list() -> Vec<Tool> {
                     "to": point_array("终点"),
                     "durationMs": { "type": "number", "description": "拖动时长，默认 300" },
                     "button": { "type": "string", "enum": ["left", "right", "middle"] },
+                    "waitMs": { "type": "number", "description": WAIT_MS_DESC },
+                    "noLock": { "type": "boolean", "description": NO_LOCK_DESC },
                 }),
                 &["from", "to"],
             )),
@@ -254,6 +270,8 @@ pub fn tool_list() -> Vec<Tool> {
                     "at": point_array("先移到该点再滚"),
                     "dy": { "type": "number" },
                     "dx": { "type": "number" },
+                    "waitMs": { "type": "number", "description": WAIT_MS_DESC },
+                    "noLock": { "type": "boolean", "description": NO_LOCK_DESC },
                 }),
                 &[],
             )),
@@ -265,6 +283,8 @@ pub fn tool_list() -> Vec<Tool> {
                 json!({
                     "text": { "type": "string" },
                     "delayMs": { "type": "number", "description": "逐字间隔，默认 0；应用丢字时调大" },
+                    "waitMs": { "type": "number", "description": WAIT_MS_DESC },
+                    "noLock": { "type": "boolean", "description": NO_LOCK_DESC },
                 }),
                 &["text"],
             )),
@@ -276,6 +296,8 @@ pub fn tool_list() -> Vec<Tool> {
                 json!({
                     "combo": { "type": "string" },
                     "repeat": { "type": "number" },
+                    "waitMs": { "type": "number", "description": WAIT_MS_DESC },
+                    "noLock": { "type": "boolean", "description": NO_LOCK_DESC },
                 }),
                 &["combo"],
             )),
@@ -288,6 +310,22 @@ pub fn tool_list() -> Vec<Tool> {
                     "app": { "type": "string", "description": "应用名或 bundle id" },
                     "pid": { "type": "number" },
                     "window": { "type": "number", "description": "窗口 id，取其所属应用" },
+                    "waitMs": { "type": "number", "description": WAIT_MS_DESC },
+                    "noLock": { "type": "boolean", "description": NO_LOCK_DESC },
+                }),
+                &[],
+            )),
+        ),
+        Tool::new(
+            "ui_lease",
+            "查看输入互斥租约的状态。多个 agent 共用一个桌面时，输入操作会先取租约；被占用时工具会返回谁在占用与预计等待时间。持有者卡死时用 action=\"clear\" 清除。",
+            schema(object(
+                json!({
+                    "action": {
+                        "type": "string",
+                        "enum": ["status", "clear"],
+                        "description": "status 查看，clear 强制清除（仅在确认持有者已卡死时用）",
+                    },
                 }),
                 &[],
             )),
@@ -394,13 +432,18 @@ pub fn tool_list() -> Vec<Tool> {
                     props.extend(wait_properties());
                     props
                 },
-                &[
-                    ("settleMs", json!({ "type": "number", "description": "点击后先等的时间，默认 120" })),
-                    ("button", json!({ "type": "string", "enum": ["left", "right", "middle"] })),
-                    ("count", json!({ "type": "number" })),
-                    ("includeImage", json!({ "type": "boolean", "description": "true 时附带变化后的截图" })),
-                    ("maxPx", json!({ "type": "number" })),
-                ],
+                &{
+                    let mut extra = vec![
+                        ("settleMs", json!({ "type": "number", "description": "点击后先等的时间，默认 120" })),
+                        ("button", json!({ "type": "string", "enum": ["left", "right", "middle"] })),
+                        ("count", json!({ "type": "number" })),
+                        ("includeImage", json!({ "type": "boolean", "description": "true 时附带变化后的截图" })),
+                        ("maxPx", json!({ "type": "number" })),
+                    ];
+                    // tap 整段独占租约，因此同样接受互斥参数。
+                    extra.extend(lease_properties());
+                    extra
+                },
             )),
         ),
     ]
@@ -413,7 +456,7 @@ mod tests {
     #[test]
     fn every_tool_has_object_schema() {
         let tools = tool_list();
-        assert_eq!(tools.len(), 21);
+        assert_eq!(tools.len(), 22);
         for tool in &tools {
             assert!(tool.description.is_some(), "{} 缺少描述", tool.name);
             assert_eq!(

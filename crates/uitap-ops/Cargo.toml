@@ -8,4 +8,7 @@ license.workspace = true
 
 [dependencies]
 uitap-core.workspace = true
+# 只为进程存活判定：租约需要知道持有者是否还在。
+# 依赖方向无环（uitap-platform 不依赖 uitap-ops）。
+uitap-platform.workspace = true
 serde_json.workspace = true

@@ -14,10 +14,19 @@ use uitap_core::store;
 
 use crate::image::{load, shot};
 use crate::json::diff_json;
+use crate::lease::with_lease;
 use crate::types::{OpResult, ShotRequest, TapRequest, Units};
 use crate::wait::{clear_frames, wait_stable};
 
+/// 点击 → 等稳定 → 比对。
+///
+/// 整段持有租约：只在点击那一瞬独占是不够的，比对结论会被别人的输入污染，
+/// 那样这个工具就失去了「验证交互是否生效」的意义。
 pub fn tap(backend: &dyn Backend, request: &TapRequest) -> OpResult<Value> {
+    with_lease(&request.lease, "ui_tap", || tap_inner(backend, request))
+}
+
+fn tap_inner(backend: &dyn Backend, request: &TapRequest) -> OpResult<Value> {
     let before_request = ShotRequest {
         target: request.target.clone(),
         path: None,

@@ -23,9 +23,9 @@ use rmcp::{ErrorData, ServerHandler};
 use uitap_core::backend::{CaptureTarget, ElementAction, TreeLimits};
 use uitap_core::geom::Rect;
 use uitap_ops::{
-    ax, image, input, observe, tap as tap_op, wait, ActivateRequest, AnchorOverride, AppTarget,
-    CropRequest, DiffRequest, ElementQuery, PixelRequest, ScrollRequest, ShotRequest, TapRequest,
-    Units, WaitParams, WindowQuery,
+    ax, image, input, lease, observe, tap as tap_op, wait, ActivateRequest, AnchorOverride,
+    AppTarget, CropRequest, DiffRequest, ElementQuery, LeaseSettings, PixelRequest, ScrollRequest,
+    ShotRequest, TapRequest, Units, WaitParams, WindowQuery,
 };
 use uitap_platform::{capture_available, open, parse_combo, Current};
 
@@ -223,6 +223,7 @@ fn dispatch(
                 point,
                 extract::button(args),
                 count,
+                &lease_settings(args),
             )?)])
         }
 
@@ -236,6 +237,7 @@ fn dispatch(
                 to,
                 extract::button(args),
                 duration,
+                &lease_settings(args),
             )?)])
         }
 
@@ -245,13 +247,22 @@ fn dispatch(
                 dx: extract::integer(args, "dx").unwrap_or(0) as i32,
                 dy: extract::integer(args, "dy").unwrap_or(0) as i32,
             };
-            Ok(vec![text(input::scroll(&backend, &request)?)])
+            Ok(vec![text(input::scroll(
+                &backend,
+                &request,
+                &lease_settings(args),
+            )?)])
         }
 
         "ui_type" => {
             let text_value = extract::required_string(args, "text")?;
             let delay = extract::integer(args, "delayMs").unwrap_or(0).max(0) as u64;
-            Ok(vec![text(input::type_text(&backend, &text_value, delay)?)])
+            Ok(vec![text(input::type_text(
+                &backend,
+                &text_value,
+                delay,
+                &lease_settings(args),
+            )?)])
         }
 
         "ui_key" => {
@@ -265,6 +276,7 @@ fn dispatch(
                 key_code,
                 &modifiers,
                 repeat,
+                &lease_settings(args),
             )?)])
         }
 
@@ -274,7 +286,11 @@ fn dispatch(
                 pid: extract::integer(args, "pid").map(|v| v as i32),
                 window: extract::integer(args, "window").map(|v| v as u64),
             };
-            Ok(vec![text(input::activate(&backend, &request)?)])
+            Ok(vec![text(input::activate(
+                &backend,
+                &request,
+                &lease_settings(args),
+            )?)])
         }
 
         "ui_tree" => {
@@ -334,6 +350,11 @@ fn dispatch(
             )?)])
         }
 
+        "ui_lease" => {
+            let action = extract::string(args, "action").unwrap_or_else(|| "status".to_string());
+            Ok(vec![text(lease::lease_report(&action)?)])
+        }
+
         "ui_tap" => {
             let at = uitap_core::geom::Point::new(
                 extract::required_number(args, "x")?,
@@ -348,6 +369,7 @@ fn dispatch(
                 wait: wait_params(args),
                 units: Some(Units::Point),
                 keep: false,
+                lease: lease_settings(args),
             };
             let payload = tap_op::tap(&backend, &request)?;
 
@@ -431,6 +453,17 @@ fn element_query(args: &Value) -> ElementQuery {
         value: extract::string(args, "value"),
         identifier: extract::string(args, "identifier"),
         enabled_only: extract::flag(args, "enabled"),
+    }
+}
+
+/// 输入操作的互斥参数。默认开启；`noLock` 关闭，`waitMs` 调整等待预算。
+fn lease_settings(args: &Value) -> LeaseSettings {
+    let settings = LeaseSettings::default()
+        .with_wait(extract::integer(args, "waitMs").unwrap_or(5_000).max(0) as u64);
+    if extract::flag(args, "noLock") {
+        settings.without_lock()
+    } else {
+        settings
     }
 }
 

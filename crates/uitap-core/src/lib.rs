@@ -6,5 +6,6 @@
 pub mod backend;
 pub mod geom;
 pub mod jsonout;
+pub mod lease;
 pub mod pixels;
 pub mod store;

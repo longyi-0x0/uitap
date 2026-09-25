@@ -37,6 +37,19 @@ mod imp {
     pub fn stop_main_thread_service() {
         uitap_macos::mainthread::shutdown()
     }
+
+    /// 进程是否还在。用信号 0 探测：进程存在返回 0，权限不足返回 EPERM（也算存在）。
+    /// 租约用它区分「持有者崩溃」与「持有者仍在忙」。
+    pub fn process_alive(pid: i32) -> bool {
+        if pid <= 0 {
+            return false;
+        }
+        let result = unsafe { libc::kill(pid, 0) };
+        if result == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -121,10 +134,15 @@ mod imp {
     }
 
     pub fn stop_main_thread_service() {}
+
+    /// 无平台实现时保守认为是活的，让租约只靠到期时间回收。
+    pub fn process_alive(pid: i32) -> bool {
+        pid > 0
+    }
 }
 
 pub use imp::{
-    capture_available, open, parse_combo, pump_main_thread, start_main_thread_service,
+    capture_available, open, parse_combo, process_alive, pump_main_thread, start_main_thread_service,
     stop_main_thread_service, Current,
 };
 

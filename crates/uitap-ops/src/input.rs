@@ -6,9 +6,22 @@ use uitap_core::backend::{ActivateTarget, Backend, MouseButton, Modifier};
 use uitap_core::geom::Point;
 
 use crate::json::ok_at_json;
+use crate::lease::{LeaseSettings, with_lease};
 use crate::types::{ActivateRequest, OpResult, ScrollRequest};
 
+/// 取租约后点击。租约只覆盖这一次投递。
 pub fn click(
+    backend: &dyn Backend,
+    at: Point,
+    button: MouseButton,
+    count: u32,
+    lease: &LeaseSettings,
+) -> OpResult<Value> {
+    with_lease(lease, "ui_click", || click_raw(backend, at, button, count))
+}
+
+/// 不取租约的点击。`tap` 等需要在更外层整段独占时用它。
+pub fn click_raw(
     backend: &dyn Backend,
     at: Point,
     button: MouseButton,
@@ -28,12 +41,31 @@ pub fn click(
     Ok(Value::Object(map))
 }
 
-pub fn move_to(backend: &dyn Backend, at: Point) -> OpResult<Value> {
-    backend.move_to(at).map_err(|e| e.to_string())?;
-    Ok(ok_at_json(at))
+pub fn move_to(
+    backend: &dyn Backend,
+    at: Point,
+    lease: &LeaseSettings,
+) -> OpResult<Value> {
+    with_lease(lease, "ui_move", || {
+        backend.move_to(at).map_err(|e| e.to_string())?;
+        Ok(ok_at_json(at))
+    })
 }
 
 pub fn drag(
+    backend: &dyn Backend,
+    from: Point,
+    to: Point,
+    button: MouseButton,
+    duration_ms: u64,
+    lease: &LeaseSettings,
+) -> OpResult<Value> {
+    with_lease(lease, "ui_drag", || {
+        drag_raw(backend, from, to, button, duration_ms)
+    })
+}
+
+pub fn drag_raw(
     backend: &dyn Backend,
     from: Point,
     to: Point,
@@ -51,7 +83,15 @@ pub fn drag(
     Ok(Value::Object(map))
 }
 
-pub fn scroll(backend: &dyn Backend, request: &ScrollRequest) -> OpResult<Value> {
+pub fn scroll(
+    backend: &dyn Backend,
+    request: &ScrollRequest,
+    lease: &LeaseSettings,
+) -> OpResult<Value> {
+    with_lease(lease, "ui_scroll", || scroll_raw(backend, request))
+}
+
+pub fn scroll_raw(backend: &dyn Backend, request: &ScrollRequest) -> OpResult<Value> {
     if request.dx == 0 && request.dy == 0 {
         return Err("--dy or --dx is required".into());
     }
@@ -66,7 +106,16 @@ pub fn scroll(backend: &dyn Backend, request: &ScrollRequest) -> OpResult<Value>
     Ok(Value::Object(map))
 }
 
-pub fn type_text(backend: &dyn Backend, text: &str, delay_ms: u64) -> OpResult<Value> {
+pub fn type_text(
+    backend: &dyn Backend,
+    text: &str,
+    delay_ms: u64,
+    lease: &LeaseSettings,
+) -> OpResult<Value> {
+    with_lease(lease, "ui_type", || type_text_raw(backend, text, delay_ms))
+}
+
+pub fn type_text_raw(backend: &dyn Backend, text: &str, delay_ms: u64) -> OpResult<Value> {
     backend
         .type_text(text, delay_ms)
         .map_err(|e| e.to_string())?;
@@ -79,6 +128,19 @@ pub fn type_text(backend: &dyn Backend, text: &str, delay_ms: u64) -> OpResult<V
 }
 
 pub fn key(
+    backend: &dyn Backend,
+    combo: &str,
+    key_code: u16,
+    modifiers: &[Modifier],
+    repeat: u32,
+    lease: &LeaseSettings,
+) -> OpResult<Value> {
+    with_lease(lease, "ui_key", || {
+        key_raw(backend, combo, key_code, modifiers, repeat)
+    })
+}
+
+pub fn key_raw(
     backend: &dyn Backend,
     combo: &str,
     key_code: u16,
@@ -103,7 +165,15 @@ pub fn key(
     Ok(Value::Object(map))
 }
 
-pub fn activate(backend: &dyn Backend, request: &ActivateRequest) -> OpResult<Value> {
+pub fn activate(
+    backend: &dyn Backend,
+    request: &ActivateRequest,
+    lease: &LeaseSettings,
+) -> OpResult<Value> {
+    with_lease(lease, "ui_activate", || activate_raw(backend, request))
+}
+
+pub fn activate_raw(backend: &dyn Backend, request: &ActivateRequest) -> OpResult<Value> {
     let target = if let Some(pid) = request.pid {
         ActivateTarget::Pid(pid)
     } else if let Some(window) = request.window {
