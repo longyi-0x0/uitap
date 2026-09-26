@@ -324,7 +324,7 @@ fn dispatch(
             Ok(vec![text(ax::tree(
                 &backend,
                 pid,
-                &tree_limits(args),
+                &tree_limits(args, TREE_DEFAULT_NODES),
                 element_window(args),
             )?)])
         }
@@ -335,7 +335,7 @@ fn dispatch(
                 &backend,
                 pid,
                 &element_query(args),
-                &tree_limits(args),
+                &tree_limits(args, TreeLimits::default().max_nodes),
                 element_window(args),
                 extract::integer(args, "limit").unwrap_or(20).max(1) as usize,
             )?)])
@@ -369,7 +369,7 @@ fn dispatch(
                 &backend,
                 pid,
                 &element_query(args),
-                &tree_limits(args),
+                &tree_limits(args, TreeLimits::default().max_nodes),
                 element_window(args),
                 extract::integer(args, "timeoutMs").unwrap_or(5000).max(100) as u64,
                 extract::integer(args, "intervalMs").unwrap_or(200).max(50) as u64,
@@ -464,18 +464,21 @@ fn element_pid(backend: &Current, args: &Value) -> Result<i32, String> {
     ax::resolve_pid(backend, &target)
 }
 
-/// 元素树遍历的边界，沿用 core 的默认值。
-fn tree_limits(args: &Value) -> TreeLimits {
+/// 元素树遍历的边界，沿用 core 的默认值；`ui_tree` 会把整棵树当结果返回，默认收得更小。
+fn tree_limits(args: &Value, default_nodes: usize) -> TreeLimits {
     let defaults = TreeLimits::default();
     TreeLimits {
         max_depth: extract::integer(args, "depth")
             .unwrap_or(defaults.max_depth as i64)
             .max(0) as usize,
         max_nodes: extract::integer(args, "maxNodes")
-            .unwrap_or(defaults.max_nodes as i64)
+            .unwrap_or(default_nodes as i64)
             .max(1) as usize,
     }
 }
+
+/// `ui_tree` 默认的节点数上限：节点按字节算不便宜，默认只取一层能看清的量。
+const TREE_DEFAULT_NODES: usize = 40;
 
 /// `--window` 限定元素树范围；给 pid 或 app 时不限定。
 fn element_window(args: &Value) -> Option<u64> {

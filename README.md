@@ -59,6 +59,11 @@ python3 parity.py
 限制 `depth` 与小 `maxNodes` 能显著减少耗时；`ui_wait_for` 每轮都重新遍历，超时前的轮询次数
 按这个量级估算。
 
+**返回体量按节点数算。** 一个节点带 `bounds` / `identifier` / `path` / `depth`，约 140 字节，
+60 个节点约 8KB——超过约 8KB 的返回会被调用方落盘，模型得再用 shell 读一次。因此 `ui_tree`
+默认只取 40 个节点（`ui_find` / `ui_wait_for` 的 `maxNodes` 是遍历预算，只有命中的元素会返回，
+保持 200）。
+
 ## 多 agent 并发
 
 多个 agent 同时驱动同一套鼠标键盘会互相破坏：A 正在点击并验证结果，B 的点击插进来，A 的
@@ -204,7 +209,7 @@ Qt 自定义绘制）往往查不到东西。
 
 | 工具 | 作用 | 备注 |
 | --- | --- | --- |
-| `ui_tree` | 读元素树 | 拍平成列表，广度优先；`depth` 默认 12、`maxNodes` 默认 200，超出时返回 `truncated` |
+| `ui_tree` | 读元素树 | 拍平成列表，广度优先；`depth` 默认 12、`maxNodes` 默认 40，超出时返回 `truncated` |
 | `ui_find` | 按条件查元素 | 条件（`role`/`subrole`/`title`/`value`/`identifier`）按「包含」匹配、大小写不敏感，给出的每一项都要满足 |
 | `ui_actions` | 列出元素可用动作 | 返回空数组表示该元素不可交互 |
 | `ui_press` | 对元素执行动作 | 默认 `press`（相当于点击）；失败时会列出该元素实际支持的动作 |

@@ -87,7 +87,7 @@ fn tree_properties() -> Vec<(&'static str, Value)> {
         ),
         (
             "maxNodes",
-            json!({ "type": "number", "description": "最大节点数，默认 200；超出时返回带 truncated" }),
+            json!({ "type": "number", "description": "最大节点数：ui_tree 默认 40，ui_find / ui_wait_for 默认 200（这两个是遍历预算，只有命中的元素才返回）。一个节点约 140 字节（含 bounds/identifier/path），先小后大；超出时返回带 truncated" }),
         ),
     ]
 }
@@ -356,7 +356,7 @@ pub fn tool_list() -> Vec<Tool> {
         ),
         Tool::new(
             "ui_tree",
-            "读取应用的辅助功能元素树（拍平，广度优先）。path 是从应用根开始的子索引链，可直接用于 ui_press / ui_set_value / ui_actions。比截图更省 token，且不受遮挡影响。",
+            "读取应用的辅助功能元素树（拍平，广度优先）。path 是从应用根开始的子索引链，可直接用于 ui_press / ui_set_value / ui_actions。比截图更省 token，且不受遮挡影响。元素树来自应用自己暴露的辅助功能信息：自绘界面（部分 Flutter、游戏、Qt 自绘）往往只有一个大容器，这时只能走坐标路径（ui_shot + ui_pixel）。",
             schema(merge(
                 &{
                     let mut props = app_target_properties();
