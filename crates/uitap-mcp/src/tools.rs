@@ -166,18 +166,18 @@ pub fn tool_list() -> Vec<Tool> {
                 &target_properties(),
                 &[
                     ("includeImage", json!({ "type": "boolean", "description": "true 时附带缩放后的图像副本" })),
-                    ("maxPx", json!({ "type": "number", "description": "图像副本最长边，默认 1280" })),
+                    ("maxPx", json!({ "type": "number", "description": "图像副本最长边，默认 1280；截图本身也按它缩放" })),
                     ("path", json!({ "type": "string", "description": "指定输出路径" })),
                 ],
             )),
         ),
         Tool::new(
             "ui_zoom",
-            "放大看某张截图的局部：按点坐标裁剪并缩放后返回图像，用于辨认细节。",
+            "放大看某张截图的局部。uitap 截的图按全局点坐标裁；用户给的图（图旁没有 .json 锚点）按图像像素裁。同时回一段元数据说明这次用的是哪种坐标。",
             schema(object(
                 json!({
                     "shot": { "type": "string", "description": "截图 id 或路径" },
-                    "region": point_array("[x, y, w, h] 全局点坐标，省略则整图"),
+                    "region": point_array("[x, y, w, h] 全局点坐标，省略则整图；图旁没有锚点时按图像像素"),
                     "maxPx": { "type": "number", "description": "最长边，默认 1400" },
                 }),
                 &["shot"],
@@ -185,13 +185,13 @@ pub fn tool_list() -> Vec<Tool> {
         ),
         Tool::new(
             "ui_pixel",
-            "取若干个点的颜色，返回 #RRGGBB。给 expect 可直接得到颜色是否匹配的判定。",
+            "取若干个点的颜色，返回 #RRGGBB。给 expect 可直接得到颜色是否匹配的判定。返回里的 units 说明这次按点坐标还是图像像素解释。",
             schema(object(
                 json!({
                     "shot": { "type": "string", "description": "截图 id 或路径" },
                     "points": {
                         "type": "array",
-                        "description": "全局点坐标数组，形如 [[x, y], ...]",
+                        "description": "点坐标数组，形如 [[x, y], ...]；uitap 截的图是全局点坐标，用户给的图是图像像素",
                         "items": { "type": "array", "items": { "type": "number" } },
                     },
                     "expect": {
@@ -206,12 +206,12 @@ pub fn tool_list() -> Vec<Tool> {
         ),
         Tool::new(
             "ui_diff",
-            "比对两张截图，返回变化区域的点坐标。验证界面是否响应首选这个。",
+            "比对两张截图，返回变化区域。验证界面是否响应首选这个。返回里的 units 说明坐标口径。",
             schema(object(
                 json!({
                     "before": { "type": "string", "description": "截图 id 或路径" },
                     "after": { "type": "string", "description": "截图 id 或路径" },
-                    "region": point_array("只比对 [x, y, w, h] 点坐标范围"),
+                    "region": point_array("只比对 [x, y, w, h]；before 没有锚点时按图像像素"),
                     "threshold": { "type": "number", "description": "单像素视为变化的色差阈值，默认 24" },
                     "maxRegions": { "type": "number", "description": "返回区域数上限，默认 6" },
                     "minPixels": { "type": "number", "description": "区域最小像素数，默认 12" },

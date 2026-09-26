@@ -180,7 +180,8 @@ fn dispatch(
             let request = PixelRequest {
                 path: resolve(shots, args, "shot")?,
                 points: extract::points(args, "points"),
-                units: Some(Units::Point),
+                // 单位交给操作层定：有锚点按点、没有按像素，并在返回里说明。
+                units: None,
                 anchor_override: AnchorOverride::default(),
             };
             let mut payload = image::pixel(&request)?;
@@ -199,7 +200,8 @@ fn dispatch(
             request.min_pixels = extract::integer(args, "minPixels").map(|v| v.max(0) as usize);
             request.max_regions = extract::integer(args, "maxRegions").map(|v| v.max(0) as usize);
             request.region = extract::rect(args, "region");
-            request.units = Some(Units::Point);
+            // 单位交给操作层定：有锚点按点、没有按像素，并在返回里说明。
+            request.units = None;
             Ok(vec![text(image::diff(&request)?)])
         }
 
