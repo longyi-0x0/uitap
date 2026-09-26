@@ -164,7 +164,8 @@ fn dispatch(
             let mut blocks = vec![text(payload)];
             if extract::flag(args, "includeImage") {
                 let max_px = extract::integer(args, "maxPx").unwrap_or(1280) as usize;
-                blocks.push(image_block(outcome.path(), None, max_px)?);
+                let (_, block) = image_block(outcome.path(), None, max_px)?;
+                blocks.push(block);
             }
             Ok(blocks)
         }
@@ -173,7 +174,8 @@ fn dispatch(
             let source = resolve(shots, args, "shot")?;
             let max_px = extract::integer(args, "maxPx").unwrap_or(1400).max(1) as usize;
             let region = extract::rect(args, "region");
-            Ok(vec![image_block(&source, region, max_px)?])
+            let (meta, block) = image_block(&source, region, max_px)?;
+            Ok(vec![text(meta), block])
         }
 
         "ui_pixel" => {
@@ -405,7 +407,8 @@ fn dispatch(
                     tag: "tap-after".to_string(),
                 })?;
                 let max_px = extract::integer(args, "maxPx").unwrap_or(1280).max(1) as usize;
-                return Ok(vec![text(payload), image_block(after.path(), None, max_px)?]);
+                let (_, block) = image_block(after.path(), None, max_px)?;
+                return Ok(vec![text(payload), block]);
             }
             Ok(vec![text(payload)])
         }
@@ -524,7 +527,12 @@ fn resolve(
 }
 
 /// 生成给模型看的缩放副本，不动原图，因此像素换算仍基于原图。
-fn image_block(source: &Path, region_points: Option<Rect>, max_px: usize) -> Result<ContentBlock, String> {
+/// 同时回一份元数据（裁剪后的 origin/scale、这次 region 用的坐标），让模型不必自己换算。
+fn image_block(
+    source: &Path,
+    region_points: Option<Rect>,
+    max_px: usize,
+) -> Result<(Value, ContentBlock), String> {
     let output = PathBuf::from(format!(
         "{}-view.png",
         source.to_string_lossy().trim_end_matches(".png")
@@ -538,11 +546,11 @@ fn image_block(source: &Path, region_points: Option<Rect>, max_px: usize) -> Res
         max_px: Some(max_px),
         anchor_override: AnchorOverride::default(),
     };
-    let _ = image::crop(&request)?;
+    let meta = image::crop(&request)?;
 
     let bytes = std::fs::read(&output).map_err(|e| format!("cannot read {}: {e}", output.display()))?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Ok(ContentBlock::image(encoded, "image/png"))
+    Ok((meta, ContentBlock::image(encoded, "image/png")))
 }
 
 /// 期望色断言：给每点加 `match`，并汇总 `allMatch`。
