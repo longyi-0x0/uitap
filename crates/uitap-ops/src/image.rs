@@ -1,4 +1,4 @@
-//! 图像类操作：截图、裁剪、取色、差分。
+//! 图像类操作：截图、裁剪、取色、按色找像素、差分。
 //!
 //! 坐标单位统一在这里解析：显式 `--scale`/`--origin` 优先于 sidecar；
 //! `units` 未指定时，有锚点就按点坐标解释，没有锚点按图像像素。
@@ -16,8 +16,8 @@ use uitap_core::store;
 
 use crate::json::diff_json;
 use crate::types::{
-    AnchorOverride, CropRequest, DiffRequest, OpResult, PixelRequest, ShotOutcome, ShotRequest,
-    Units,
+    AnchorOverride, CropRequest, DiffRequest, FindPixelsRequest, OpResult, PixelRequest,
+    ShotOutcome, ShotRequest, Units,
 };
 
 pub fn load(path: &Path) -> OpResult<RgbaImage> {
@@ -345,4 +345,359 @@ pub fn diff(request: &DiffRequest) -> OpResult<Value> {
     let result = pixels::diff(&before, &after, &request.options(region_pixels))
         .map_err(|e| e.to_string())?;
     Ok(diff_json(&result, anchor, point_units))
+}
+
+/// 按颜色找像素：命中数、每种色的命中数、包围盒与连通聚簇。
+/// 输出坐标与输入 `region` 同一坐标系：有锚点给点坐标，没有给像素。
+pub fn find_pixels(request: &FindPixelsRequest) -> OpResult<Value> {
+    if request.colors.is_empty() {
+        return Err("至少给一个目标色，写成 #RRGGBB 或 [r, g, b]".into());
+    }
+
+    let image = load(&request.path)?;
+    let anchor = resolve_anchor(&request.path, &request.anchor_override);
+    let units = units_for(request.units, anchor);
+    if units == Units::Point && anchor.is_none() {
+        return Err(missing_anchor_error(&request.path));
+    }
+
+    if let Some(region) = request.region {
+        if let Some(message) = region_out_of_range(region, &image, units, anchor) {
+            return Err(message);
+        }
+    }
+
+    let region_pixels = match (units, request.region, anchor) {
+        (Units::Point, Some(region), Some(anchor)) => {
+            Some(store::point_rect_to_pixels(&anchor, region))
+        }
+        (_, region, _) => region,
+    };
+
+    let mask = pixels::color_mask(&image, region_pixels, &request.colors, request.tolerance);
+    let convert = |rect: Rect| -> Rect {
+        match (units, anchor) {
+            (Units::Point, Some(anchor)) => anchor.to_point(rect),
+            _ => rect,
+        }
+    };
+
+    let mut map = Map::new();
+    map.insert("units".into(), Value::String(units.as_str().into()));
+    map.insert("size".into(), size_json(image.width, image.height));
+    if let Some(region) = request.region {
+        map.insert("region".into(), rect_json(region));
+    }
+    map.insert("count".into(), Value::from(mask.total()));
+    map.insert(
+        "perColor".into(),
+        Value::Array(
+            request
+                .colors
+                .iter()
+                .enumerate()
+                .map(|(index, color)| {
+                    let mut item = Map::new();
+                    item.insert(
+                        "color".into(),
+                        Value::String(format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2])),
+                    );
+                    item.insert(
+                        "count".into(),
+                        Value::from(mask.per_color.get(index).copied().unwrap_or(0)),
+                    );
+                    Value::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    if let Some(bounds) = mask.bounds() {
+        map.insert("bbox".into(), rect_json(convert(bounds)));
+    }
+
+    let (clusters, truncated) = mask.into_clusters(request.min_pixels, request.max_clusters);
+    map.insert(
+        "clusters".into(),
+        Value::Array(
+            clusters
+                .iter()
+                .map(|cluster| {
+                    let mut item = match rect_json(convert(cluster.bounds)) {
+                        Value::Object(map) => map,
+                        _ => Map::new(),
+                    };
+                    item.insert("pixels".into(), Value::from(cluster.count));
+                    Value::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    if truncated {
+        map.insert("clustersTruncated".into(), Value::Bool(true));
+    }
+    Ok(Value::Object(map))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// 100x80 的图：(10,10) 起 4x3 红块、(60,50) 起 2x2 红块，其余白底。
+    fn fixture_image() -> RgbaImage {
+        let mut image = RgbaImage::new(100, 80, vec![255; 100 * 80 * 4]);
+        for (x0, y0, w, h) in [(10usize, 10usize, 4usize, 3usize), (60, 50, 2, 2)] {
+            for y in y0..y0 + h {
+                for x in x0..x0 + w {
+                    let index = (y * 100 + x) * 4;
+                    image.data[index] = 255;
+                    image.data[index + 1] = 0;
+                    image.data[index + 2] = 0;
+                }
+            }
+        }
+        image
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("uitap-ops-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("建临时目录");
+            Self(path)
+        }
+
+        fn file(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 写一张图；给了 `anchor` 就连同 sidecar 一起写，与 shot 的产物同形。
+    fn write_image(path: &Path, image: &RgbaImage, anchor: Option<(Point, f64)>) {
+        pixels::save_png(image, path).expect("写图");
+        if let Some((origin, scale)) = anchor {
+            let sidecar = serde_json::json!({
+                "path": path.to_string_lossy(),
+                "origin": { "x": origin.x, "y": origin.y },
+                "scale": scale,
+            });
+            fs::write(store::sidecar_path(path), sidecar.to_string()).expect("写 sidecar");
+        }
+    }
+
+    fn crop_request(input: &Path, region_points: Rect) -> CropRequest {
+        CropRequest {
+            input: input.to_path_buf(),
+            output: None,
+            region: None,
+            region_points: Some(region_points),
+            max_px: None,
+            anchor_override: AnchorOverride::default(),
+        }
+    }
+
+    #[test]
+    fn region_out_of_range_names_the_edge_and_the_frame() {
+        let dir = TempDir::new("range-point");
+        let path = dir.file("shot.png");
+        // 2048x1080 点的屏按 1500/2048 缩放后的图，与真实会话里那次失败同形。
+        let image = RgbaImage::new(1500, 791, vec![255; 1500 * 791 * 4]);
+        write_image(
+            &path,
+            &image,
+            Some((Point::new(1920.0, 0.0), 1500.0 / 2048.0)),
+        );
+
+        let error = crop(&crop_request(&path, Rect::new(1900.0, 480.0, 600.0, 220.0)))
+            .expect_err("越界应报错");
+        assert!(error.contains("x 1900..2500 越出 1920..3968"), "{error}");
+        assert!(error.contains("region 按点坐标给"), "{error}");
+
+        // 起点落在图左侧：越出的是左边界，不是宽高。
+        let error = crop(&crop_request(&path, Rect::new(1180.0, 480.0, 260.0, 220.0)))
+            .expect_err("越界应报错");
+        assert!(error.contains("x 1180..1440 越出 1920..3968"), "{error}");
+    }
+
+    #[test]
+    fn region_out_of_range_in_pixels_reports_pixel_frame() {
+        let dir = TempDir::new("range-pixel");
+        let path = dir.file("plain.png");
+        write_image(&path, &fixture_image(), None);
+
+        let request = CropRequest {
+            region: Some(Rect::new(0.0, 0.0, 200.0, 40.0)),
+            ..crop_request(&path, Rect::new(0.0, 0.0, 0.0, 0.0))
+        };
+        let error = crop(&request).expect_err("越界应报错");
+        assert!(error.contains("x 0..200 越出 0..100"), "{error}");
+        assert!(error.contains("100x80 像素"), "{error}");
+        assert!(error.contains("region 按像素坐标给"), "{error}");
+    }
+
+    #[test]
+    fn region_points_fall_back_to_pixels_without_anchor() {
+        let dir = TempDir::new("no-anchor-crop");
+        let path = dir.file("pasted.png");
+        write_image(&path, &fixture_image(), None);
+
+        // 同一份 regionPoints：有锚点时按点，没有锚点时按像素，不再报错。
+        let out = crop(&crop_request(&path, Rect::new(10.0, 10.0, 4.0, 3.0))).expect("应能裁");
+        assert_eq!(out.get("regionUnits").and_then(Value::as_str), Some("pixel"));
+        assert!(out.get("origin").is_none(), "没有锚点就不该报 origin");
+    }
+
+    #[test]
+    fn pixel_units_follow_the_anchor() {
+        let dir = TempDir::new("pixel-units");
+        let plain = dir.file("plain.png");
+        let shot = dir.file("shot.png");
+        write_image(&plain, &fixture_image(), None);
+        write_image(
+            &shot,
+            &fixture_image(),
+            Some((Point::new(100.0, 50.0), 1.0)),
+        );
+
+        let request = PixelRequest {
+            path: plain.clone(),
+            points: vec![Point::new(10.0, 10.0)],
+            units: None,
+            anchor_override: AnchorOverride::default(),
+        };
+        let out = pixel(&request).expect("无锚点按像素取色");
+        assert_eq!(out.get("units").and_then(Value::as_str), Some("pixel"));
+        assert_eq!(
+            out.pointer("/points/0/hex").and_then(Value::as_str),
+            Some("#FF0000")
+        );
+
+        // 同一份点坐标，对有锚点的图按点解释：(110, 60) 才是那块红。
+        let request = PixelRequest {
+            path: shot,
+            points: vec![Point::new(110.0, 60.0)],
+            units: None,
+            anchor_override: AnchorOverride::default(),
+        };
+        let out = pixel(&request).expect("有锚点按点取色");
+        assert_eq!(out.get("units").and_then(Value::as_str), Some("point"));
+        assert_eq!(
+            out.pointer("/points/0/hex").and_then(Value::as_str),
+            Some("#FF0000")
+        );
+    }
+
+    #[test]
+    fn explicit_point_units_without_anchor_says_what_to_do() {
+        let dir = TempDir::new("explicit-point");
+        let path = dir.file("pasted.png");
+        write_image(&path, &fixture_image(), None);
+
+        let request = PixelRequest {
+            path,
+            points: vec![Point::new(10.0, 10.0)],
+            units: Some(Units::Point),
+            anchor_override: AnchorOverride::default(),
+        };
+        let error = pixel(&request).expect_err("显式点坐标但没有锚点应报错");
+        assert!(error.contains("旁边没有锚点"), "{error}");
+        assert!(error.contains("改按图像像素给"), "{error}");
+    }
+
+    #[test]
+    fn find_pixels_reports_counts_bounds_and_clusters() {
+        let dir = TempDir::new("find-pixels");
+        let path = dir.file("plain.png");
+        write_image(&path, &fixture_image(), None);
+
+        let request = FindPixelsRequest {
+            path,
+            region: None,
+            units: None,
+            colors: vec![[255, 0, 0]],
+            tolerance: 12.0,
+            min_pixels: 1,
+            max_clusters: 8,
+            anchor_override: AnchorOverride::default(),
+        };
+        let out = find_pixels(&request).expect("找色");
+        assert_eq!(out.get("units").and_then(Value::as_str), Some("pixel"));
+        assert_eq!(out.get("count").and_then(Value::as_u64), Some(16));
+        assert_eq!(out.pointer("/bbox/x").and_then(Value::as_u64), Some(10));
+        assert_eq!(out.pointer("/bbox/y").and_then(Value::as_u64), Some(10));
+        assert_eq!(out.pointer("/bbox/w").and_then(Value::as_u64), Some(52));
+        assert_eq!(out.pointer("/bbox/h").and_then(Value::as_u64), Some(42));
+        assert_eq!(
+            out.pointer("/clusters/0/pixels").and_then(Value::as_u64),
+            Some(12)
+        );
+        assert_eq!(
+            out.pointer("/clusters/1/pixels").and_then(Value::as_u64),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn find_pixels_converts_to_points_with_anchor() {
+        let dir = TempDir::new("find-pixels-point");
+        let path = dir.file("shot.png");
+        write_image(&path, &fixture_image(), Some((Point::new(200.0, 100.0), 2.0)));
+
+        let request = FindPixelsRequest {
+            path,
+            region: None,
+            units: None,
+            colors: vec![[255, 0, 0]],
+            tolerance: 12.0,
+            min_pixels: 1,
+            max_clusters: 8,
+            anchor_override: AnchorOverride::default(),
+        };
+        let out = find_pixels(&request).expect("找色");
+        assert_eq!(out.get("units").and_then(Value::as_str), Some("point"));
+        // 像素 (10,10) 在原点 (200,100)、scale 2 下是点 (205, 105)。
+        assert_eq!(out.pointer("/clusters/0/x").and_then(Value::as_f64), Some(205.0));
+        assert_eq!(out.pointer("/clusters/0/y").and_then(Value::as_f64), Some(105.0));
+    }
+
+    #[test]
+    fn find_pixels_requires_a_color() {
+        let dir = TempDir::new("find-pixels-empty");
+        let path = dir.file("plain.png");
+        write_image(&path, &fixture_image(), None);
+        let request = FindPixelsRequest {
+            path,
+            region: None,
+            units: None,
+            colors: Vec::new(),
+            tolerance: 12.0,
+            min_pixels: 1,
+            max_clusters: 8,
+            anchor_override: AnchorOverride::default(),
+        };
+        assert!(find_pixels(&request).is_err());
+    }
+
+    #[test]
+    fn colors_parse_from_text_and_triples() {
+        assert_eq!(parse_color_text("#2F6BFF"), Some([0x2F, 0x6B, 0xFF]));
+        assert_eq!(parse_color_text("2f6bff"), Some([0x2F, 0x6B, 0xFF]));
+        assert_eq!(parse_color_text("#2F6B"), None);
+        assert_eq!(
+            parse_color(&serde_json::json!([47, 107, 255])),
+            Some([0x2F, 0x6B, 0xFF])
+        );
+        assert_eq!(
+            parse_color(&serde_json::json!("#2F6BFF")),
+            Some([0x2F, 0x6B, 0xFF])
+        );
+    }
 }

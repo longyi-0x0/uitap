@@ -1,6 +1,6 @@
 # uitap
 
-桌面观测与输入合成。给模型一组可直接调用的工具：列窗口、截图、取色、比图、点按拖拽、键入组合键。
+桌面观测与输入合成。给模型一组可直接调用的工具：列窗口、截图、取色、按色找像素、比图、点按拖拽、键入组合键。
 
 单个二进制同时是命令行与 MCP server，没有 Node 或 Python 运行时依赖。
 
@@ -28,7 +28,7 @@ tools/uitap/build.sh
 ## 测试
 
 ```bash
-cargo test                          # 37 项单测：几何换算、JSON 数值约定、差分区域、应用匹配、主线程派发
+cargo test                          # 87 项单测：几何换算、JSON 数值约定、差分区域、颜色命中与聚簇、坐标口径、应用匹配、主线程派发
 python3 parity.py                   # 与 Swift 版逐字节对拍
 ```
 
@@ -170,7 +170,7 @@ Retina 上 `scale` 为 2；非 Retina 与缩放显示器为 1。
 
 两组工具走的是两条不同的路径，可以混用。
 
-**观测与输入**（21 个中的 15 个）走屏幕像素与合成事件：能用在不暴露辅助功能信息的界面上，
+**观测与输入**（23 个中的 16 个）走屏幕像素与合成事件：能用在不暴露辅助功能信息的界面上，
 代价是必须抢前台、必须对准坐标。
 
 | 工具 | 作用 | 备注 |
@@ -181,7 +181,8 @@ Retina 上 `scale` 为 2；非 Retina 与缩放显示器为 1。
 | `ui_shot` | 截图 | 默认只回锚点与短 id；`includeImage` 才返回图像 |
 | `ui_zoom` | 局部放大 | 按点坐标裁剪并缩放，用于辨认细节 |
 | `ui_pixel` | 取点颜色 | 传 `expect` 时直接返回 `match` 布尔值，省掉模型侧的比较 |
-| `ui_diff` | 两张截图比对 | 返回变化区域的点坐标，验证界面是否响应首选 |
+| `ui_find_pixels` | 按颜色找像素 | 回命中数、包围盒与连通聚簇（位置与像素数）；代替「截图之后自己写循环扫像素」 |
+| `ui_diff` | 两张截图比对 | 返回变化区域，验证界面是否响应首选这个 |
 | `ui_wait_stable` | 等画面不动 | 动画、加载结束后再观察 |
 | `ui_click` | 点击 | `count: 2` 为双击 |
 | `ui_drag` | 拖拽 | 默认 300ms 分 20 段，太快会被应用丢帧 |
@@ -191,7 +192,8 @@ Retina 上 `scale` 为 2；非 Retina 与缩放显示器为 1。
 | `ui_activate` | 切前台 | `frontmost` 是确认过的结果，不是发出请求就算成功 |
 | `ui_tap` | 点击 → 等稳定 → 比对 | 一次调用替代 `ui_shot` + `ui_wait_stable` + `ui_diff` 三步；整段独占互斥租约 |
 
-除 `ui_doctor`、`ui_screens`、`ui_windows`、`ui_shot`、`ui_zoom`、`ui_pixel`、`ui_diff`、
+除 `ui_doctor`、`ui_screens`、`ui_windows`、`ui_shot`、`ui_zoom`、`ui_pixel`、`ui_find_pixels`、
+`ui_diff`、
 `ui_wait_stable` 这几个只读工具外，其余输入类工具（`ui_click`、`ui_drag`、`ui_scroll`、
 `ui_type`、`ui_key`、`ui_activate`、`ui_tap`）动手前会先取一次**跨进程互斥租约**，
 多个 agent 共用一个桌面时不会互相踩。见「多 agent 并发」。
@@ -233,6 +235,7 @@ uitap wait-for --app Finder --role AXDialog --timeout 5000
 uitap windows --app Code --layer 0 --minWidth 800
 uitap shot --window 101664 --path /tmp/w.png
 uitap pixel --path /tmp/w.png --at 400,300 --units point
+uitap find-pixels --path /tmp/w.png --color "#2F6BFF" --region 3600,600,400,300
 uitap diff --before a.png --after b.png --units point
 uitap tap --at 15,15 --region 0,0,700,700
 uitap click --at 400,300 --count 2
@@ -240,7 +243,7 @@ uitap key --combo "cmd+shift+t"
 uitap type --text "你好"
 ```
 
-`wait-stable` 的 `--threshold` 是变化比例上限（默认 0.0006）；`diff` / `tap` 的 `--threshold` 是单像素色差阈值（默认 24）。
+`wait-stable` 的 `--threshold` 是变化比例上限（默认 0.0006）；`diff` / `tap` 的 `--threshold` 是单像素色差阈值（默认 24）；`find-pixels` 的 `--tolerance` 是单通道容差（默认 12），`--color` 可给多次，命中其中任一个即算。
 
 ## 平台
 

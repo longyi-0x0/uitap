@@ -22,6 +22,8 @@ const USAGE: &str = r#"uitap — 跨平台桌面观测与输入合成，输出�
   shot      [--window ID | --region X,Y,W,H | --display N] [--path P] [--maxPx N]
   crop      --in P [--out P] [--region X,Y,W,H | --regionPoints X,Y,W,H] [--maxPx N]
   pixel     --path P --at X,Y [--at X,Y ...] [--units pixel|point]
+  find-pixels --path P --color #RRGGBB [--color ...] [--region X,Y,W,H]
+            [--tolerance N] [--minPixels N] [--maxClusters N] [--units pixel|point]
   diff      --before P --after P [--region X,Y,W,H] [--threshold N] [--minPixels N]
             [--maxRegions N] [--units pixel|point]
 
@@ -56,8 +58,9 @@ const USAGE: &str = r#"uitap — 跨平台桌面观测与输入合成，输出�
   mcp                                       以 stdio 起 MCP server
 
 坐标默认是全局点坐标，左上角为原点。shot 会在 PNG 旁写同名 .json 记录 origin 与 scale，
-其后 pixel / diff 无需再指定。wait-stable 的 --threshold 是变化比例上限（默认 0.0006），
-diff 的 --threshold 是单像素色差阈值（默认 24）。
+其后 pixel / diff 无需再指定；图旁没有这份锚点时（外部截图），region 与点按图像像素解释。
+wait-stable 的 --threshold 是变化比例上限（默认 0.0006），diff 的 --threshold 是单像素色差
+阈值（默认 24），find-pixels 的 --tolerance 是单通道容差（默认 12）。
 
 输入类命令（click / move / drag / scroll / type / key / activate / tap）默认先取一次
 跨进程租约，避免多个 agent 同时驱动同一套输入。拿不到时不会干等：报告谁在占用、还需
@@ -80,6 +83,7 @@ fn main() {
         // 纯图像处理与平台无关，不需要后端。
         "crop" => dispatch_crop(&args),
         "pixel" => dispatch_pixel(&args),
+        "find-pixels" => dispatch_find_pixels(&args),
         "diff" => dispatch_diff(&args),
         _ => {
             let backend = open();
@@ -103,6 +107,14 @@ fn dispatch_crop(a: &Args) -> ! {
 fn dispatch_pixel(a: &Args) -> ! {
     let path = std::path::PathBuf::from(require(a, "path"));
     finish(image::pixel(&mapping::pixel_request(a, path)))
+}
+
+fn dispatch_find_pixels(a: &Args) -> ! {
+    let path = std::path::PathBuf::from(require(a, "path"));
+    if !a.has("color") {
+        fail("--color #RRGGBB is required");
+    }
+    finish(image::find_pixels(&mapping::find_pixels_request(a, path)))
 }
 
 fn dispatch_diff(a: &Args) -> ! {

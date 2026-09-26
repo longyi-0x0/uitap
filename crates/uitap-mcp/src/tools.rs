@@ -205,6 +205,26 @@ pub fn tool_list() -> Vec<Tool> {
             )),
         ),
         Tool::new(
+            "ui_find_pixels",
+            "在一张截图里找某个颜色的像素：回命中总数、包围盒与各连通聚簇（位置与像素数）。用它代替「截图之后自己写循环扫像素」。",
+            schema(object(
+                json!({
+                    "shot": { "type": "string", "description": "截图 id 或路径" },
+                    "colors": {
+                        "type": "array",
+                        "description": "目标色，如 [\"#2F6BFF\"]；命中其中任一个即算，perColor 分别给各色的命中数",
+                        "items": { "type": "string" },
+                    },
+                    "color": { "type": "string", "description": "只找一个颜色时的简写，等价于 colors: [color]" },
+                    "region": point_array("[x, y, w, h] 只在这块里找；uitap 截的图按全局点坐标，用户给的图按图像像素"),
+                    "tolerance": { "type": "number", "description": "单通道容差，默认 12" },
+                    "minPixels": { "type": "number", "description": "聚簇的最小像素数，默认 4；更小的丢掉" },
+                    "maxClusters": { "type": "number", "description": "返回聚簇数上限，默认 8；按像素数降序" },
+                }),
+                &["shot"],
+            )),
+        ),
+        Tool::new(
             "ui_diff",
             "比对两张截图，返回变化区域。验证界面是否响应首选这个。返回里的 units 说明坐标口径。",
             schema(object(
@@ -456,7 +476,7 @@ mod tests {
     #[test]
     fn every_tool_has_object_schema() {
         let tools = tool_list();
-        assert_eq!(tools.len(), 22);
+        assert_eq!(tools.len(), 23);
         for tool in &tools {
             assert!(tool.description.is_some(), "{} 缺少描述", tool.name);
             assert_eq!(

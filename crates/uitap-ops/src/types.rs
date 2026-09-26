@@ -118,6 +118,19 @@ pub struct PixelRequest {
     pub anchor_override: AnchorOverride,
 }
 
+/// 在截图里按颜色找像素。`region` 与输出同 `units`：有锚点就是点坐标，没有就是像素。
+#[derive(Clone, Debug)]
+pub struct FindPixelsRequest {
+    pub path: PathBuf,
+    pub region: Option<Rect>,
+    pub units: Option<Units>,
+    pub colors: Vec<[u8; 3]>,
+    pub tolerance: f64,
+    pub min_pixels: usize,
+    pub max_clusters: usize,
+    pub anchor_override: AnchorOverride,
+}
+
 #[derive(Clone, Debug)]
 pub struct DiffRequest {
     pub before: PathBuf,

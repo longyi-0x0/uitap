@@ -6,9 +6,9 @@ use uitap_core::backend::{CaptureTarget, MouseButton};
 use uitap_core::geom::Point;
 use uitap_core::backend::{ElementAction, TreeLimits};
 use uitap_ops::{
-    ActivateRequest, AnchorOverride, AppTarget, CropRequest, DiffRequest, ElementQuery,
-    LeaseSettings, PixelRequest, ScrollRequest, ShotRequest, TapRequest, Units, WaitParams,
-    WindowQuery,
+    image, observe, ActivateRequest, AnchorOverride, AppTarget, CropRequest, DiffRequest,
+    ElementQuery, FindPixelsRequest, LeaseSettings, OpResult, PixelRequest, ScrollRequest,
+    ShotRequest, TapRequest, Units, WaitParams, WindowQuery,
 };
 
 use crate::args::Args;
@@ -80,6 +80,23 @@ pub fn pixel_request(a: &Args, path: PathBuf) -> PixelRequest {
         path,
         points: a.points("at"),
         units: units(a),
+        anchor_override: anchor_override(a),
+    }
+}
+
+pub fn find_pixels_request(a: &Args, path: PathBuf) -> FindPixelsRequest {
+    FindPixelsRequest {
+        path,
+        region: a.rect("region"),
+        units: units(a),
+        colors: a
+            .all("color")
+            .into_iter()
+            .filter_map(image::parse_color_text)
+            .collect(),
+        tolerance: a.double("tolerance", 12.0),
+        min_pixels: a.int("minPixels", 4).max(1) as usize,
+        max_clusters: a.int("maxClusters", 8).max(1) as usize,
         anchor_override: anchor_override(a),
     }
 }

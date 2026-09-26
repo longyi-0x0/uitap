@@ -139,6 +139,184 @@ pub fn crop_and_scale(
     Ok((out_rgba.width() as usize, out_rgba.height() as usize))
 }
 
+/// 单通道色差不超过 `tolerance` 即算命中，与 `pixel --expect` 的判定一致。
+pub fn color_within(pixel: (u8, u8, u8, u8), target: [u8; 3], tolerance: f64) -> bool {
+    [(pixel.0, target[0]), (pixel.1, target[1]), (pixel.2, target[2])]
+        .iter()
+        .all(|(actual, want)| (*actual as f64 - *want as f64).abs() <= tolerance)
+}
+
+/// 一片命中区域：像素数与包围盒（像素，左上角含、右下角不含）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorCluster {
+    pub count: usize,
+    pub bounds: Rect,
+}
+
+/// 目标色的命中掩码。掩码只覆盖限定区域，坐标是图像内的像素。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorMask {
+    /// 掩码左上角在图像内的像素坐标。
+    pub x0: usize,
+    pub y0: usize,
+    pub w: usize,
+    pub h: usize,
+    /// 行主序，长度 `w * h`。
+    pub hits: Vec<bool>,
+    /// 与目标色一一对应的命中数。
+    pub per_color: Vec<usize>,
+}
+
+impl ColorMask {
+    pub fn total(&self) -> usize {
+        self.per_color.iter().sum()
+    }
+
+    /// 全部命中像素的包围盒，无命中时为 None。
+    pub fn bounds(&self) -> Option<Rect> {
+        let mut min_x = usize::MAX;
+        let mut min_y = usize::MAX;
+        let mut max_x = 0usize;
+        let mut max_y = 0usize;
+        let mut any = false;
+        for y in 0..self.h {
+            for x in 0..self.w {
+                if !self.hits[y * self.w + x] {
+                    continue;
+                }
+                any = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+        if !any {
+            return None;
+        }
+        Some(Rect::new(
+            (self.x0 + min_x) as f64,
+            (self.y0 + min_y) as f64,
+            (max_x - min_x + 1) as f64,
+            (max_y - min_y + 1) as f64,
+        ))
+    }
+
+    /// 八邻域连通聚簇，按像素数降序（同数按上、左优先）。
+    /// 第二个返回值表示 `max_clusters` 之外还有聚簇被丢掉。
+    pub fn into_clusters(mut self, min_pixels: usize, max_clusters: usize) -> (Vec<ColorCluster>, bool) {
+        let mut clusters: Vec<ColorCluster> = Vec::new();
+        let mut stack: Vec<usize> = Vec::new();
+
+        for start in 0..self.hits.len() {
+            if !self.hits[start] {
+                continue;
+            }
+            self.hits[start] = false;
+            stack.push(start);
+
+            let mut count = 0usize;
+            let mut min_x = usize::MAX;
+            let mut min_y = usize::MAX;
+            let mut max_x = 0usize;
+            let mut max_y = 0usize;
+
+            while let Some(index) = stack.pop() {
+                let x = index % self.w;
+                let y = index / self.w;
+                count += 1;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+
+                for dy in -1i64..=1 {
+                    for dx in -1i64..=1 {
+                        let nx = x as i64 + dx;
+                        let ny = y as i64 + dy;
+                        if nx < 0 || ny < 0 || nx >= self.w as i64 || ny >= self.h as i64 {
+                            continue;
+                        }
+                        let neighbour = ny as usize * self.w + nx as usize;
+                        if self.hits[neighbour] {
+                            self.hits[neighbour] = false;
+                            stack.push(neighbour);
+                        }
+                    }
+                }
+            }
+
+            if count >= min_pixels.max(1) {
+                clusters.push(ColorCluster {
+                    count,
+                    bounds: Rect::new(
+                        (self.x0 + min_x) as f64,
+                        (self.y0 + min_y) as f64,
+                        (max_x - min_x + 1) as f64,
+                        (max_y - min_y + 1) as f64,
+                    ),
+                });
+            }
+        }
+
+        clusters.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then(a.bounds.min_y().partial_cmp(&b.bounds.min_y()).unwrap_or(std::cmp::Ordering::Equal))
+                .then(a.bounds.min_x().partial_cmp(&b.bounds.min_x()).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        let truncated = clusters.len() > max_clusters;
+        clusters.truncate(max_clusters);
+        (clusters, truncated)
+    }
+}
+
+/// 在限定区域内找命中任一目标色的像素。区域按像素，超出图像的部分被裁掉。
+pub fn color_mask(
+    image: &RgbaImage,
+    region: Option<Rect>,
+    colors: &[[u8; 3]],
+    tolerance: f64,
+) -> ColorMask {
+    let full = Rect::new(0.0, 0.0, image.width as f64, image.height as f64);
+    let scan = match region {
+        Some(region) => region.intersect(&full).integral(),
+        None => full,
+    };
+    let x0 = (scan.min_x().max(0.0) as usize).min(image.width);
+    let y0 = (scan.min_y().max(0.0) as usize).min(image.height);
+    let x1 = (scan.max_x().max(0.0) as usize).min(image.width);
+    let y1 = (scan.max_y().max(0.0) as usize).min(image.height);
+    let w = x1.saturating_sub(x0);
+    let h = y1.saturating_sub(y0);
+
+    let mut hits = vec![false; w * h];
+    let mut per_color = vec![0usize; colors.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let Some(pixel) = image.color((x0 + x) as i64, (y0 + y) as i64) else {
+                continue;
+            };
+            for (slot, target) in colors.iter().enumerate() {
+                if color_within(pixel, *target, tolerance) {
+                    hits[y * w + x] = true;
+                    per_color[slot] += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    ColorMask {
+        x0,
+        y0,
+        w,
+        h,
+        hits,
+        per_color,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct DiffOptions {
     /// 单像素视为变化的色差阈值（三通道绝对差之和）。
@@ -464,5 +642,80 @@ mod tests {
         let a = RgbaImage::new(2, 2, vec![0; 16]);
         let b = RgbaImage::new(3, 2, vec![0; 24]);
         assert!(diff(&a, &b, &DiffOptions::default()).is_err());
+    }
+
+    /// 100x100 白底：(10,10) 起 5x4 红块、(60,70) 起 2x2 红块、(80,5) 单点红。
+    fn color_fixture() -> RgbaImage {
+        let mut image = RgbaImage::new(100, 100, vec![255; 100 * 100 * 4]);
+        let mut put = |x0: usize, y0: usize, w: usize, h: usize, rgb: [u8; 3]| {
+            for y in y0..y0 + h {
+                for x in x0..x0 + w {
+                    let index = (y * 100 + x) * 4;
+                    image.data[index] = rgb[0];
+                    image.data[index + 1] = rgb[1];
+                    image.data[index + 2] = rgb[2];
+                }
+            }
+        };
+        put(10, 10, 5, 4, [255, 0, 0]);
+        put(60, 70, 2, 2, [255, 0, 0]);
+        put(80, 5, 1, 1, [255, 0, 0]);
+        image
+    }
+
+    #[test]
+    fn color_mask_counts_and_bounds() {
+        let image = color_fixture();
+        let mask = color_mask(&image, None, &[[255, 0, 0]], 12.0);
+        assert_eq!(mask.total(), 20 + 4 + 1);
+        assert_eq!(mask.bounds(), Some(Rect::new(10.0, 5.0, 71.0, 67.0)));
+    }
+
+    #[test]
+    fn color_mask_honours_tolerance_and_region() {
+        let image = color_fixture();
+        // 容差 0 时白底不算命中红。
+        let strict = color_mask(&image, None, &[[255, 0, 0]], 0.0);
+        assert_eq!(strict.total(), 25);
+        // 区域限定到左半幅，红块只剩 20 像素。
+        let limited = color_mask(&image, Some(Rect::new(0.0, 0.0, 50.0, 50.0)), &[[255, 0, 0]], 0.0);
+        assert_eq!(limited.total(), 20);
+        assert_eq!(limited.bounds(), Some(Rect::new(10.0, 10.0, 5.0, 4.0)));
+    }
+
+    #[test]
+    fn color_mask_splits_clusters_by_connectivity() {
+        let image = color_fixture();
+        let mask = color_mask(&image, None, &[[255, 0, 0]], 0.0);
+        let (clusters, truncated) = mask.into_clusters(1, 8);
+        assert!(!truncated);
+        assert_eq!(clusters.len(), 3);
+        assert_eq!(clusters[0].count, 20);
+        assert_eq!(clusters[0].bounds, Rect::new(10.0, 10.0, 5.0, 4.0));
+        assert_eq!(clusters[1].count, 4);
+        assert_eq!(clusters[2].count, 1);
+    }
+
+    #[test]
+    fn min_pixels_and_max_clusters_bound_the_result() {
+        let image = color_fixture();
+        let mask = color_mask(&image, None, &[[255, 0, 0]], 0.0);
+        let (clusters, truncated) = mask.into_clusters(2, 8);
+        // 单点被 minPixels 滤掉。
+        assert_eq!(clusters.len(), 2);
+        assert!(!truncated);
+
+        let mask = color_mask(&image, None, &[[255, 0, 0]], 0.0);
+        let (clusters, truncated) = mask.into_clusters(1, 2);
+        assert_eq!(clusters.len(), 2);
+        assert!(truncated, "还有聚簇被丢掉时应报 truncated");
+    }
+
+    #[test]
+    fn per_color_counts_are_separate() {
+        let image = color_fixture();
+        let mask = color_mask(&image, None, &[[255, 0, 0], [255, 255, 255]], 0.0);
+        assert_eq!(mask.per_color, vec![25, 9975]);
+        assert_eq!(mask.total(), 10000);
     }
 }

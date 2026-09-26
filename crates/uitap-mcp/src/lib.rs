@@ -24,8 +24,8 @@ use uitap_core::backend::{CaptureTarget, ElementAction, TreeLimits};
 use uitap_core::geom::Rect;
 use uitap_ops::{
     ax, image, input, lease, observe, tap as tap_op, wait, ActivateRequest, AnchorOverride,
-    AppTarget, CropRequest, DiffRequest, ElementQuery, LeaseSettings, PixelRequest, ScrollRequest,
-    ShotRequest, TapRequest, Units, WaitParams, WindowQuery,
+    AppTarget, CropRequest, DiffRequest, ElementQuery, FindPixelsRequest, LeaseSettings,
+    PixelRequest, ScrollRequest, ShotRequest, TapRequest, Units, WaitParams, WindowQuery,
 };
 use uitap_platform::{capture_available, open, parse_combo, Current};
 
@@ -192,6 +192,28 @@ fn dispatch(
                 annotate_matches(&mut payload, expect, tolerance);
             }
             Ok(vec![text(payload)])
+        }
+
+        "ui_find_pixels" => {
+            let mut colors: Vec<[u8; 3]> = args
+                .get("colors")
+                .and_then(Value::as_array)
+                .map(|list| list.iter().filter_map(image::parse_color).collect())
+                .unwrap_or_default();
+            if let Some(color) = args.get("color").and_then(image::parse_color) {
+                colors.push(color);
+            }
+            let request = FindPixelsRequest {
+                path: resolve(shots, args, "shot")?,
+                region: extract::rect(args, "region"),
+                units: None,
+                colors,
+                tolerance: extract::number(args, "tolerance").unwrap_or(12.0),
+                min_pixels: extract::integer(args, "minPixels").unwrap_or(4).max(1) as usize,
+                max_clusters: extract::integer(args, "maxClusters").unwrap_or(8).max(1) as usize,
+                anchor_override: AnchorOverride::default(),
+            };
+            Ok(vec![text(image::find_pixels(&request)?)])
         }
 
         "ui_diff" => {
@@ -546,31 +568,7 @@ fn annotate_matches(payload: &mut Value, expect: &[Value], tolerance: f64) {
 }
 
 fn parse_hex(value: &Value) -> Option<[u8; 3]> {
-    // 也接受 [r, g, b] 形式。
-    if let Some(array) = value.as_array() {
-        if array.len() >= 3 {
-            return Some([
-                clamp_channel(array[0].as_f64()?),
-                clamp_channel(array[1].as_f64()?),
-                clamp_channel(array[2].as_f64()?),
-            ]);
-        }
-        return None;
-    }
-
-    let text = value.as_str()?.trim_start_matches('#');
-    if text.len() != 6 || !text.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let mut out = [0u8; 3];
-    for (index, slot) in out.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some(out)
-}
-
-fn clamp_channel(value: f64) -> u8 {
-    value.round().clamp(0.0, 255.0) as u8
+    image::parse_color(value)
 }
 
 /// 去掉空串、null 与空数组，压低返回体积。布尔值保留，避免语义丢失。
