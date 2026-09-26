@@ -285,7 +285,11 @@ fn find_window_index(app: &AxElement, attrs: &Attrs, window_id: u64) -> Result<u
         .into_iter()
         .find(|w| w.id == window_id)
         .map(|w| w.bounds)
-        .ok_or_else(|| BackendError::Failed(format!("window {window_id} not found")))?;
+        .ok_or_else(|| {
+            BackendError::Failed(format!(
+                "窗口 {window_id} 不在了（窗口已关闭，或应用重启过导致 id 变了）：重新列一次窗口取 id"
+            ))
+        })?;
 
     let children = app.children(attrs.children);
     for (index, child) in children.iter().enumerate() {

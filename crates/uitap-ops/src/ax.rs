@@ -50,7 +50,9 @@ pub fn resolve_pid(backend: &dyn Backend, target: &AppTarget) -> OpResult<i32> {
             .into_iter()
             .find(|w| w.id == *id)
             .map(|w| w.pid)
-            .ok_or_else(|| format!("window {id} not found")),
+            .ok_or_else(|| {
+                format!("窗口 {id} 不在了（窗口已关闭，或应用重启过导致 id 变了）：重新列一次窗口取 id")
+            }),
         AppTarget::App(name) => backend
             .running_app(name)
             .map(|app| app.pid)

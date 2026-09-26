@@ -46,7 +46,11 @@ impl MacBackend {
         self.windows(true)?
             .into_iter()
             .find(|w| w.id == id)
-            .ok_or_else(|| BackendError::Failed(format!("window {id} not found")))
+            .ok_or_else(|| {
+                BackendError::Failed(format!(
+                    "窗口 {id} 不在了（窗口已关闭，或应用重启过导致 id 变了）：重新列一次窗口取 id"
+                ))
+            })
     }
 }
 
@@ -98,11 +102,15 @@ impl Backend for MacBackend {
         unsafe {
             let mut count: u32 = 0;
             if CGGetActiveDisplayList(0, std::ptr::null_mut(), &mut count) != 0 || count == 0 {
-                return Err(BackendError::Failed("no active display".into()));
+                return Err(BackendError::Failed(
+                    "当前没有可用显示器（多因显示器休眠、锁屏或刚断开）：稍后重试".into(),
+                ));
             }
             let mut ids = vec![0u32; count as usize];
             if CGGetActiveDisplayList(count, ids.as_mut_ptr(), &mut count) != 0 {
-                return Err(BackendError::Failed("cannot enumerate displays".into()));
+                return Err(BackendError::Failed(
+                    "显示器列表读不出来：稍后重试".into(),
+                ));
             }
             ids.truncate(count as usize);
 
@@ -266,14 +274,14 @@ impl Backend for MacBackend {
 
         if !output.status.success() {
             return Err(BackendError::Failed(format!(
-                "screencapture failed: {}",
+                "screencapture 退出码非零：{}（截图报错时先跑一次 doctor 看屏幕录制授权）",
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
         // screencapture 拒绝写入时退出码仍可能为 0，必须核实产物。
         if !out.exists() {
             return Err(BackendError::Failed(format!(
-                "screencapture wrote nothing to {}: {}",
+                "screencapture 没写出 {}：{}（退出码 0 不代表写成功；先跑一次 doctor 看屏幕录制授权）",
                 out.display(),
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
@@ -455,8 +463,12 @@ impl Backend for MacBackend {
     }
 
     fn running_app(&self, name: &str) -> Result<RunningApp> {
-        let app = find_running_app(name)
-            .ok_or_else(|| BackendError::Failed(format!("application not found: {name}")))?;
+        let app = find_running_app(name).ok_or_else(|| {
+            BackendError::Failed(format!(
+                "没找到应用「{name}」：查询词要与应用名或 bundle id 的末段对得上，\
+                 先列一次窗口或取一次前台应用看实际名字"
+            ))
+        })?;
         Ok(app_info(&app))
     }
 
@@ -467,7 +479,9 @@ impl Backend for MacBackend {
                 frontmost: true,
                 ..app_info(&app)
             }),
-            None => Err(BackendError::Failed("no frontmost application".into())),
+            None => Err(BackendError::Failed(
+                "当前没有前台应用：先切一个应用到前台再取".into(),
+            )),
         }
     }
 
@@ -509,7 +523,9 @@ impl MacBackend {
             ActivateTarget::App(name) => find_running_app(name),
         };
 
-        let app = app.ok_or_else(|| BackendError::Failed("application not found".into()))?;
+        let app = app.ok_or_else(|| {
+            BackendError::Failed("没找到要激活的应用：查询词要与应用名或 bundle id 的末段对得上".into())
+        })?;
         let target_pid = app.processIdentifier();
         let info = app_info(&app);
 

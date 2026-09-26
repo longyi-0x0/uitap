@@ -526,7 +526,22 @@ fn resolve(
 ) -> Result<PathBuf, String> {
     let reference = extract::required_string(args, key)?;
     let registry = shots.lock().map_err(|_| "截图登记表不可用".to_string())?;
+    if registry.paths.contains_key(&reference) {
+        return Ok(registry.resolve(&reference));
+    }
+    // 短 id 只在本进程内有效；编号形如 s1、s2，撞上说明这轮登记表里没有它。
+    if looks_like_shot_id(&reference) {
+        return Err(format!(
+            "截图 id {reference} 不在本次登记表里（server 重启过，或编号已经越过它）：\
+             重新截一次，或直接传文件路径"
+        ));
+    }
     Ok(registry.resolve(&reference))
+}
+
+fn looks_like_shot_id(reference: &str) -> bool {
+    let digits = reference.strip_prefix('s').unwrap_or("");
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
 
 /// 生成给模型看的缩放副本，不动原图，因此像素换算仍基于原图。
