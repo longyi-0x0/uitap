@@ -146,7 +146,7 @@ fn dispatch(
 
         "ui_shot" => {
             let request = ShotRequest {
-                target: target(args)?,
+                target: capture_target(&backend, args)?,
                 path: extract::string(args, "path").map(PathBuf::from),
                 max_px: extract::integer(args, "maxPx").map(|v| v.max(0) as usize),
                 tag: "shot".to_string(),
@@ -231,7 +231,7 @@ fn dispatch(
             let params = wait_params(args);
             Ok(vec![text(wait::wait_stable_json(
                 &backend,
-                &target(args)?,
+                &capture_target(&backend, args)?,
                 &params,
             )?)])
         }
@@ -386,7 +386,7 @@ fn dispatch(
             );
             let request = TapRequest {
                 at,
-                target: target(args)?,
+                target: capture_target(&backend, args)?,
                 button: extract::button(args),
                 count: extract::integer(args, "count").unwrap_or(1).max(1) as u32,
                 settle_ms: extract::integer(args, "settleMs").unwrap_or(120).max(0) as u64,
@@ -418,6 +418,19 @@ fn dispatch(
 
 fn text(value: Value) -> ContentBlock {
     ContentBlock::text(compact(&value).to_string())
+}
+
+/// 截图目标：window / region / display 显式给出时按它们；只给 app 时取该应用最前的普通窗口。
+fn capture_target(backend: &Current, args: &Value) -> Result<CaptureTarget, String> {
+    if extract::integer(args, "window").is_none()
+        && extract::rect(args, "region").is_none()
+        && extract::integer(args, "display").is_none()
+    {
+        if let Some(app) = extract::string(args, "app") {
+            return Ok(CaptureTarget::Window(observe::app_window(backend, &app)?.id));
+        }
+    }
+    target(args)
 }
 
 fn target(args: &Value) -> Result<CaptureTarget, String> {

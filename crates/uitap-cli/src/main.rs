@@ -19,7 +19,7 @@ const USAGE: &str = r#"uitap — 跨平台桌面观测与输入合成，输出�
             [--frontOnly] [--limit N]
   frontmost                                 当前前台应用
 
-  shot      [--window ID | --region X,Y,W,H | --display N] [--path P] [--maxPx N]
+  shot      [--window ID | --region X,Y,W,H | --display N | --app NAME] [--path P] [--maxPx N]
   crop      --in P [--out P] [--region X,Y,W,H | --regionPoints X,Y,W,H] [--maxPx N]
   pixel     --path P --at X,Y [--at X,Y ...] [--units pixel|point]
   find-pixels --path P --color #RRGGBB [--color ...] [--region X,Y,W,H]
@@ -27,8 +27,8 @@ const USAGE: &str = r#"uitap — 跨平台桌面观测与输入合成，输出�
   diff      --before P --after P [--region X,Y,W,H] [--threshold N] [--minPixels N]
             [--maxRegions N] [--units pixel|point]
 
-  wait-stable [--window ID | --region X,Y,W,H | --display N] [--interval MS] [--timeout MS]
-            [--threshold R] [--stableSamples N]
+  wait-stable [--window ID | --region X,Y,W,H | --display N | --app NAME]
+            [--interval MS] [--timeout MS] [--threshold R] [--stableSamples N]
 
   click     --at X,Y [--button left|right|middle] [--count N]
   move      --to X,Y
@@ -38,7 +38,7 @@ const USAGE: &str = r#"uitap — 跨平台桌面观测与输入合成，输出�
   key       --combo "cmd+shift+t" [--repeat N]
   activate  [--app NAME | --pid N | --window ID]
 
-  tap       --at X,Y [--window ID | --region X,Y,W,H | --display N] [--timeout MS]
+  tap       --at X,Y [--window ID | --region X,Y,W,H | --display N | --app NAME] [--timeout MS]
             [--stableSamples N] [--button N] [--count N] [--keep]
 
   tree      [--app N | --pid N | --window ID] [--depth N] [--maxNodes N]
@@ -130,8 +130,13 @@ fn dispatch_platform(command: &str, a: &Args, backend: &uitap_platform::Current)
         "screens" => observe::screens(backend),
         "windows" => observe::windows(backend, &mapping::window_query(a)),
         "frontmost" => observe::frontmost(backend),
-        "shot" => image::shot(backend, &mapping::shot_request(a, "shot")).map(|out| out.json()),
-        "wait-stable" => wait::wait_stable_json(backend, &mapping::target(a), &mapping::wait_params(a)),
+        "shot" => mapping::capture_target(backend, a)
+            .map(|target| mapping::shot_request(a, target, "shot"))
+            .and_then(|request| image::shot(backend, &request))
+            .map(|out| out.json()),
+        "wait-stable" => mapping::capture_target(backend, a).and_then(|target| {
+            wait::wait_stable_json(backend, &target, &mapping::wait_params(a))
+        }),
         "click" => match a.point("at") {
             Some(at) => input::click(
                 backend,
@@ -175,7 +180,9 @@ fn dispatch_platform(command: &str, a: &Args, backend: &uitap_platform::Current)
         ),
         "lock" => uitap_ops::lease::lease_report(a.str("action").unwrap_or("status")),
         "tap" => match a.point("at") {
-            Some(at) => tap_op::tap(backend, &mapping::tap_request(a, at)),
+            Some(at) => mapping::capture_target(backend, a)
+                .map(|target| mapping::tap_request(a, target, at))
+                .and_then(|request| tap_op::tap(backend, &request)),
             None => Err("--at x,y is required".into()),
         },
         "tree" => dispatch_element(a, backend, |backend, pid| {

@@ -125,3 +125,73 @@ pub fn frontmost(backend: &dyn Backend) -> OpResult<Value> {
     let app = backend.frontmost().map_err(|e| e.to_string())?;
     Ok(app_json(&app))
 }
+
+/// 应用最前的普通窗口（窗口层级 0、叠放序号最小）。
+/// 给「按应用名取一块画面」用：窗口 id 每次重启都会变，按应用名取就不必先列窗口。
+pub fn app_window(backend: &dyn Backend, app: &str) -> OpResult<uitap_core::backend::WindowInfo> {
+    let windows = backend.windows(false).map_err(|e| e.to_string())?;
+    pick_app_window(&windows, app).ok_or_else(|| {
+        format!(
+            "没找到「{app}」的普通窗口（层级 0）：名字对不上，或它当前没有窗口。\
+             先列一次窗口看实际的名字"
+        )
+    })
+}
+
+/// 从窗口列表里挑出目标应用最前的普通窗口。
+fn pick_app_window(
+    windows: &[uitap_core::backend::WindowInfo],
+    app: &str,
+) -> Option<uitap_core::backend::WindowInfo> {
+    let needle = app.to_ascii_lowercase();
+    windows
+        .iter()
+        .filter(|w| w.layer == 0 && w.app.to_ascii_lowercase().contains(&needle))
+        .min_by_key(|w| w.z)
+        .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uitap_core::backend::WindowInfo;
+    use uitap_core::geom::Rect;
+
+    fn window(id: u64, app: &str, layer: i32, z: usize) -> WindowInfo {
+        WindowInfo {
+            id,
+            pid: 1,
+            app: app.to_string(),
+            title: String::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            layer,
+            onscreen: true,
+            z,
+        }
+    }
+
+    #[test]
+    fn picks_frontmost_normal_window_of_the_app() {
+        let windows = vec![
+            window(1, "classroom_app", 25, 0),
+            window(2, "classroom_app", 0, 3),
+            window(3, "classroom_app", 0, 1),
+        ];
+        assert_eq!(pick_app_window(&windows, "classroom").map(|w| w.id), Some(3));
+    }
+
+    #[test]
+    fn ignores_other_apps_and_non_normal_layers() {
+        let windows = vec![
+            window(1, "other_app", 0, 0),
+            window(2, "classroom_app", 25, 0),
+        ];
+        assert!(pick_app_window(&windows, "classroom").is_none());
+    }
+
+    #[test]
+    fn app_matching_is_case_insensitive_substring() {
+        let windows = vec![window(9, "Classroom_App", 0, 5)];
+        assert_eq!(pick_app_window(&windows, "CLASSROOM").map(|w| w.id), Some(9));
+    }
+}

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use uitap_core::backend::{CaptureTarget, MouseButton};
+use uitap_core::backend::{Backend, CaptureTarget, MouseButton};
 use uitap_core::geom::Point;
 use uitap_core::backend::{ElementAction, TreeLimits};
 use uitap_ops::{
@@ -31,6 +31,16 @@ pub fn target(a: &Args) -> CaptureTarget {
     }
 }
 
+/// 截图目标：前三者显式给出时按它们；只给 `--app` 时取该应用最前的普通窗口。
+pub fn capture_target(backend: &dyn Backend, a: &Args) -> OpResult<CaptureTarget> {
+    if a.str("window").is_none() && a.str("region").is_none() && !a.has("display") {
+        if let Some(app) = a.str("app") {
+            return Ok(CaptureTarget::Window(observe::app_window(backend, app)?.id));
+        }
+    }
+    Ok(target(a))
+}
+
 pub fn anchor_override(a: &Args) -> AnchorOverride {
     AnchorOverride {
         scale: a.str("scale").and_then(|v| v.parse::<f64>().ok()),
@@ -55,9 +65,9 @@ pub fn window_query(a: &Args) -> WindowQuery {
     }
 }
 
-pub fn shot_request(a: &Args, tag: &str) -> ShotRequest {
+pub fn shot_request(a: &Args, target: CaptureTarget, tag: &str) -> ShotRequest {
     ShotRequest {
-        target: target(a),
+        target,
         path: a.str("path").map(PathBuf::from),
         max_px: a.str("maxPx").and_then(|v| v.parse::<usize>().ok()),
         tag: tag.to_string(),
@@ -136,10 +146,10 @@ pub fn tap_wait_params(a: &Args) -> WaitParams {
     }
 }
 
-pub fn tap_request(a: &Args, at: Point) -> TapRequest {
+pub fn tap_request(a: &Args, target: CaptureTarget, at: Point) -> TapRequest {
     TapRequest {
         at,
-        target: target(a),
+        target,
         button: button(a),
         count: a.int("count", 1).max(1) as u32,
         settle_ms: a.int("settle", 120).max(0) as u64,

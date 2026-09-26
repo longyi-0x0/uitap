@@ -29,7 +29,7 @@ fn point_array(description: &str) -> Value {
     json!({ "type": "array", "items": { "type": "number" }, "description": description })
 }
 
-/// 观测目标三选一：窗口 id、屏幕区域、显示器序号。
+/// 观测目标四选一：窗口 id、屏幕区域、显示器序号、应用名。
 fn target_properties() -> Vec<(&'static str, Value)> {
     vec![
         (
@@ -43,6 +43,10 @@ fn target_properties() -> Vec<(&'static str, Value)> {
         (
             "display",
             json!({ "type": "number", "description": "显示器序号（ui_screens 的 index 字段）" }),
+        ),
+        (
+            "app",
+            json!({ "type": "string", "description": "应用名或 bundle id，取该应用最前的普通窗口。窗口 id 每次重启都会变，按应用名取就不必先列窗口；给了 window/region/display 时以它们为准" }),
         ),
     ]
 }

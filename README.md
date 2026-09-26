@@ -178,8 +178,8 @@ Retina 上 `scale` 为 2；非 Retina 与缩放显示器为 1。
 | `ui_doctor` | 授权与依赖自检 | 任何工具报权限错误时先看这个 |
 | `ui_screens` | 显示器列表 | `bounds` 是点坐标，`pixels` 是像素，`scale` 是倍率 |
 | `ui_windows` | 窗口列表 | 按面积降序，同尺寸按前后叠放（`z` 越小越前），默认 25 个 |
-| `ui_shot` | 截图 | 默认只回锚点与短 id；`includeImage` 才返回图像 |
-| `ui_zoom` | 局部放大 | 按点坐标裁剪并缩放，用于辨认细节 |
+| `ui_shot` | 截图 | 默认只回锚点与短 id；`includeImage` 才返回图像；给 `app` 取该应用最前的普通窗口 |
+| `ui_zoom` | 局部放大 | 按点坐标裁剪并缩放，用于辨认细节；回图像的同时回裁剪后的锚点元数据 |
 | `ui_pixel` | 取点颜色 | 传 `expect` 时直接返回 `match` 布尔值，省掉模型侧的比较 |
 | `ui_find_pixels` | 按颜色找像素 | 回命中数、包围盒与连通聚簇（位置与像素数）；代替「截图之后自己写循环扫像素」 |
 | `ui_diff` | 两张截图比对 | 返回变化区域，验证界面是否响应首选这个 |
@@ -234,6 +234,7 @@ uitap wait-for --app Finder --role AXDialog --timeout 5000
 
 uitap windows --app Code --layer 0 --minWidth 800
 uitap shot --window 101664 --path /tmp/w.png
+uitap shot --app classroom_app --path /tmp/w.png
 uitap pixel --path /tmp/w.png --at 400,300 --units point
 uitap find-pixels --path /tmp/w.png --color "#2F6BFF" --region 3600,600,400,300
 uitap diff --before a.png --after b.png --units point
